@@ -1,0 +1,182 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ambulancias {
+  numero_placa_sm         String                    @id @unique
+  id_paramedicos          Int?
+  id_hospitales           Int?
+  hospitales              hospitales?               @relation(fields: [id_hospitales], references: [id_hospitales], onDelete: Cascade, onUpdate: NoAction)
+  paramedicos             paramedicos?              @relation(fields: [id_paramedicos], references: [id_paramedicos], onDelete: Cascade, onUpdate: NoAction)
+  modelo                  String?                   @db.VarChar(255)
+  disponible              Disposition               @default(si)
+  ambulancias_doctor      ambulancias_doctor[]
+  ambulancias_hospitales  ambulancias_hospitales[]
+  ambulancias_paramedicos ambulancias_paramedicos[]
+  reportes                ReportePrehospitalario[]
+}
+
+enum Disposition {
+  si
+  no
+}
+
+model ambulancias_doctor {
+  id_doctor       Int
+  numero_placa_sm String
+  reporte_doctor  String?     @db.VarChar(255)
+  doctor          doctor      @relation(fields: [id_doctor], references: [id_doctor], onDelete: Cascade, onUpdate: NoAction)
+  ambulancias     ambulancias @relation(fields: [numero_placa_sm], references: [numero_placa_sm], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([id_doctor, numero_placa_sm])
+}
+
+model ambulancias_hospitales {
+  id_hospitales    Int
+  numero_placa_sm  String
+  reporte_servicio String?     @db.VarChar(255)
+  hospitales       hospitales  @relation(fields: [id_hospitales], references: [id_hospitales], onDelete: Cascade, onUpdate: NoAction)
+  ambulancias      ambulancias @relation(fields: [numero_placa_sm], references: [numero_placa_sm], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([id_hospitales, numero_placa_sm])
+}
+
+model ambulancias_paramedicos {
+  id_ambulancias_paramedicos Int          @id @unique @default(autoincrement())
+  id_paramedicos             Int?
+  numero_placa_sm            String?
+  reporte_inicial            String?      @db.VarChar(255)
+  fecha                      DateTime?    @db.Timestamp(6)
+  estado                     String?      @db.VarChar(50)
+  paramedicos                paramedicos? @relation(fields: [id_paramedicos], references: [id_paramedicos], onDelete: Cascade, onUpdate: NoAction)
+  ambulancias                ambulancias? @relation(fields: [numero_placa_sm], references: [numero_placa_sm], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model doctor {
+  id_doctor          Int                  @id @default(autoincrement())
+  nombre             String?              @db.VarChar(255)
+  apellidos          String?              @db.VarChar(255)
+  licencia_medica    String?              @unique @db.VarChar(255)
+  password           String?              @db.VarChar(72)
+  ambulancias_doctor ambulancias_doctor[]
+}
+
+model hospitales {
+  id_hospitales          Int                      @id @default(autoincrement())
+  nombre                 String?                  @db.VarChar(255)
+  direccion              String?                  @db.VarChar(255)
+  password               String?                  @db.VarChar(72)
+  ambulancias            ambulancias[]
+  ambulancias_hospitales ambulancias_hospitales[]
+}
+
+model operador {
+  id              Int     @id @default(autoincrement())
+  nombre          String? @db.VarChar(50)
+  licencia_medica String? @unique @db.VarChar(50)
+  turno           Shifts?
+  password        String? @db.VarChar(72)
+}
+
+enum Shifts {
+  diurno
+  nocturno
+}
+
+model paramedicos {
+  id_paramedicos          Int                       @id @default(autoincrement())
+  nombre                  String?                   @db.VarChar(255)
+  apellidos               String?                   @db.VarChar(255)
+  licencia_medica         String?                   @unique @db.VarChar(255)
+  certificado             String?                   @db.VarChar(255)
+  licencia_conducir       String?                   @db.VarChar(255)
+  password                String?                   @db.VarChar(72)
+  ambulancias             ambulancias[]
+  ambulancias_paramedicos ambulancias_paramedicos[]
+}
+
+model Paciente {
+  id_paciente        Int                      @id @default(autoincrement())
+  nombre             String?                  @db.VarChar(255)
+  edad               Int?
+  sexo               String                   @db.VarChar(1)
+  descripcion_lesion String?                  @db.Text
+  motivo_urgencia    String                   @db.VarChar(255)
+  tipo_accidente     String?                  @db.VarChar(255)
+  lugar              String?                  @db.VarChar(255)
+  observaciones      String?                  @db.Text
+  signos_vitales     SignosVitales?
+  pacientes_lesion   PacientesLesion[]
+  reporte            ReportePrehospitalario[]
+
+  @@map("pacientes")
+}
+
+model SignosVitales {
+  id_signos               Int                     @id @default(autoincrement())
+  frecuencia_cardiaca     String?                 @db.VarChar(50)
+  frecuencia_respiratoria String?                 @db.VarChar(50)
+  tension_arterial        String?                 @db.VarChar(50)
+  saturacion_oxigeno      String?                 @db.VarChar(50)
+  temperatura             String?                 @db.VarChar(50)
+  nivel_glucosa           String?                 @db.VarChar(50)
+  estado_neurologico      String?                 @db.VarChar(255)
+  paciente                Paciente                @relation(fields: [paciente_id], references: [id_paciente], onDelete: Cascade)
+  paciente_id             Int                     @unique
+  reporte                 ReportePrehospitalario?
+
+  @@map("signos_vitales")
+}
+
+model TipoLesion {
+  id_lesion        Int               @id @default(autoincrement())
+  descripcion      String            @db.VarChar(255)
+  pacientes_lesion PacientesLesion[]
+
+  @@map("tipo_lesion")
+}
+
+model PacientesLesion {
+  id_pacientes_lesion Int        @id @default(autoincrement())
+  paciente_id         Int
+  lesion_id           Int
+  paciente            Paciente   @relation(fields: [paciente_id], references: [id_paciente], onDelete: Cascade)
+  tipo_lesion         TipoLesion @relation(fields: [lesion_id], references: [id_lesion], onDelete: Cascade)
+
+  @@map("pacientes_lesion")
+}
+
+model ReportePrehospitalario {
+  id_reporte             Int              @id @default(autoincrement())
+  id_paciente            Int
+  id_ambulancia          String
+  hora_estimada_llegada  DateTime?
+  ubicacion_actual       String?
+  condicion_actual       String?
+  codigo_prioridad       String?
+  descripcion_escena     String?
+  otros_hallazgos        String?
+  instrucciones_hospital String?
+  paciente               Paciente         @relation(fields: [id_paciente], references: [id_paciente], onDelete: Cascade)
+  ambulancia             ambulancias      @relation(fields: [id_ambulancia], references: [numero_placa_sm], onDelete: Cascade)
+  intervenciones         Intervenciones[]
+  signos_vitales         SignosVitales?   @relation(fields: [id_signos], references: [id_signos], map: "reporte_signos")
+  created_at             DateTime         @default(now())
+  updated_at             DateTime         @updatedAt
+
+  id_signos Int? @unique
+}
+
+model Intervenciones {
+  id_intervencion   Int                    @id @default(autoincrement())
+  id_reporte        Int
+  tipo_intervencion String
+  descripcion       String?
+  hora_intervencion DateTime
+  reporte           ReportePrehospitalario @relation(fields: [id_reporte], references: [id_reporte], onDelete: Cascade)
+}
