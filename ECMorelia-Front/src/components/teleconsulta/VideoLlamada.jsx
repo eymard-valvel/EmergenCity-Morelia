@@ -77,7 +77,7 @@ export default function VideoLlamada() {
         },
         onLeaveRoom: () => {
           console.log('Salió de la sala');
-          navigate('/sala-espera');
+          navigate('/videocall');
         },
         onUserJoin: (users) => {
           console.log('Usuario unido:', users);
@@ -97,7 +97,7 @@ export default function VideoLlamada() {
 
   const salirVideollamada = () => {
     if (window.confirm('¿Estás seguro de que quieres salir de la videollamada?')) {
-      navigate('/sala-espera');
+      navigate('/videocall');
     }
   };
 
@@ -123,7 +123,7 @@ export default function VideoLlamada() {
               Reintentar Conexión
             </button>
             <button
-              onClick={() => navigate('/sala-espera')}
+              onClick={() => navigate('/videocall')}
               className="w-full bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition-colors text-sm"
             >
               Volver a Sala de Espera
