@@ -15,12 +15,12 @@ import usuario from '../img/formularioIngresoIcono.png'; // Asegúrate que esta 
 const validationSchema = Yup.object().shape({
 	role: Yup.string().required("El tipo de usuario es requerido"),
 	nombre: Yup.string().when("role", {
-		is: (role) => role === "hospital", // Simplificado
+		is: (role) => role === "hospitales", // Simplificado
 		then: (schema) => schema.required("El nombre del hospital es requerido"), // Añadido required
 		otherwise: (schema) => schema,
 	}),
 	licencia_medica: Yup.string().when("role", {
-		is: (role) => role !== "hospital", // Simplificado
+		is: (role) => role !== "hospitales", // Simplificado
 		then: (schema) => schema.required("La licencia médica es requerida"), // Añadido required
 		otherwise: (schema) => schema,
 	}),
@@ -39,14 +39,14 @@ const initialValues = {
 const roles = [
 	{ role: "Operador", value: "operador" },
 	{ role: "Paramedico", value: "paramedicos" },
-	{ role: "Hospital", value: "hospital" },
+	{ role: "Hospital", value: "hospitales" },
 	{ role: "Doctor", value: "doctor" }
 ];
 
 const routes = {
 	operador: "/navegaciongps",
 	paramedicos: "/reportepaciente",
-	hospital: "/navegacion", // Asumiendo que hospital también va al mapa
+	hospitales: "/navmapa", // Asumiendo que hospital también va al mapa
 	doctor: "/doctor"
 };
 
@@ -62,39 +62,55 @@ const Login = () => {
 		validationSchema,
 		validateOnBlur: true, // Habilita validación al perder foco
 		validateOnChange: true, // Habilita validación al cambiar
-		onSubmit: async (values) => {
-			setLoginError(""); // Limpia errores previos
-			try {
-				const newValues = {
-					role: values.role,
-					password: values.password,
-					...(values.role === "hospital" ? { nombre: values.nombre } : { licencia_medica: values.licencia_medica })
-				};
+		// En el onSubmit del FormularioIngreso.jsx, modifica esta parte:
+onSubmit: async (values) => {
+  setLoginError(""); // Limpia errores previos
+  try {
+    const newValues = {
+      role: values.role,
+      password: values.password,
+      ...(values.role === "hospitales" ? { 
+        nombre: values.nombre 
+      } : { 
+        licencia_medica: values.licencia_medica 
+      })
+    };
 
-				const request = await fetch(`${import.meta.env.VITE_API}/auth/login/${newValues.role}`, {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json"
-					},
-					body: JSON.stringify(newValues)
-				});
+    const request = await fetch(`${import.meta.env.VITE_API}/auth/login/${newValues.role}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(newValues)
+    });
 
-				if (!request.ok) {
-					// Intenta obtener un mensaje de error del backend
-					const errorData = await request.json().catch(() => ({ message: "Credenciales inválidas o error en el servidor." }));
-					throw new Error(errorData.message || "Credenciales inválidas.");
-				}
+    if (!request.ok) {
+      const errorData = await request.json().catch(() => ({ message: "Credenciales inválidas o error en el servidor." }));
+      throw new Error(errorData.message || "Credenciales inválidas.");
+    }
 
-				const { role } = await request.json();
-				newCookie({ name: "role", value: role });
-				setAuth(role);
-				navigate(routes[values.role]);
+    const response = await request.json();
+    
+    // GUARDAR INFORMACIÓN DEL HOSPITAL EN LOCALSTORAGE
+    if (values.role === "hospitales") {
+      localStorage.setItem('hospitalInfo', JSON.stringify({
+        nombre: values.nombre,
+        // Aquí podrías agregar más datos del hospital que devuelva tu API
+        id: response.hospitalId || null,
+        // Agregar ubicación por defecto o desde la respuesta
+        ubicacion: response.ubicacion || { lat: 19.702428, lng: -101.1969319 }
+      }));
+    }
+    
+    newCookie({ name: "role", value: response.role });
+    setAuth(response.role);
+    navigate(routes[values.role]);
 
-			} catch (error) {
-				console.error("Error de login:", error.message);
-				setLoginError(error.message); // Muestra el mensaje de error al usuario
-			}
-		}
+  } catch (error) {
+    console.error("Error de login:", error.message);
+    setLoginError(error.message);
+  }
+}
 	});
 
 	// Efecto para cargar rol guardado (sin cambios)
@@ -184,7 +200,7 @@ const Login = () => {
 								/>
 							</div>
 
-							{userType === "hospital" ? (
+							{userType === "hospitales" ? (
 								<div>
 									<label htmlFor="nombre" className="block text-bluish-gray uppercase font-bold text-sm sm:text-base text-left mb-1"> {/* Color y tamaño nuevo */}
 										Nombre Hospital
@@ -203,7 +219,7 @@ const Login = () => {
 									/>
 								</div>
 							) : ( // Muestra licencia solo si hay un rol seleccionado Y no es hospital
-								userType && userType !== "hospital" && (
+								userType && userType !== "hospitales" && (
 									<div>
 										<label htmlFor="licencia_medica" className="block text-bluish-gray uppercase font-bold text-sm sm:text-base text-left mb-1"> {/* Color y tamaño nuevo */}
 											Licencia Medica

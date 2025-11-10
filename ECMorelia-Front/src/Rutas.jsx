@@ -15,7 +15,9 @@ import VideoLlamada from "./components/teleconsulta/VideoLlamada"; // Videollama
 import DoctorLayout from "./components/doctor/DoctorLayout";
 import ReportePaciente from "./components/reportepaciente/ReportePaciente";
 import ReportesPage from "./components/doctor/ReportesPage";
-import MapaNavegacion from './components/Mapa/MapaNavegacion';
+import MapaOperador from './components/Mapa/MapaOperador';
+import MapaHospital from './components/Mapa/MapaHospital';
+
 
 function Rutas() {
 	return (
@@ -47,7 +49,8 @@ function Rutas() {
 							<Route path="operadores" element={<Operadores />} />
 							<Route path="medicos" element={<Medicos />} />
 							{/* Nueva ruta de navegación GPS dentro del layout del mapa */}
-							<Route path="navegaciongps" element={<MapaNavegacion />} />
+							<Route path="navegaciongps" element={<MapaOperador />} />
+							<Route path="navmapa" element={<MapaHospital />} /> 
 							<Route path="navegacion" element={<Mapa />} /> {/* Mantenemos Mapa pero con funcionalidad de navegación */}
 						</Route>
 						<Route element={<DoctorLayout />} path="/doctor">
