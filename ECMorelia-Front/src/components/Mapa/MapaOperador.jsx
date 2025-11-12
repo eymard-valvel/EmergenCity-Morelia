@@ -33,6 +33,7 @@ const injectStyles = () => {
   .notify.show { opacity:1; transform:translateY(0); }
   .ambulance-marker { width:56px; height:56px; display:flex; align-items:center; justify-content:center; }
   .ambulance-marker svg { filter:drop-shadow(0 6px 12px rgba(0,0,0,0.6)); transition:transform 300ms linear; }
+  .route-info { position:absolute; top:80px; left:20px; background:rgba(11,23,34,0.9); padding:15px; border-radius:8px; color:white; z-index:1; max-width:300px; }
   `;
   if (!document.getElementById('map-style')) {
     const s = document.createElement('style');
@@ -84,6 +85,8 @@ export default function MapaOperador() {
   const marker = useRef(null);
   const watchId = useRef(null);
   const prev = useRef(null);
+  const hospitalMarkersRef = useRef([]); // Nuevo ref para marcadores de hospitales
+  const routeLayerIdRef = useRef(null); // Nuevo ref para controlar la capa de ruta
 
   const [pos, setPos] = useState(null);
   const [speed, setSpeed] = useState(0);
@@ -92,6 +95,7 @@ export default function MapaOperador() {
   const [dest, setDest] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [notify, setNotify] = useState('');
+  const [routeInfo, setRouteInfo] = useState(null); // Nuevo estado para info de ruta
 
   const [age, setAge] = useState('');
   const [sex, setSex] = useState('');
@@ -100,6 +104,176 @@ export default function MapaOperador() {
   const [selected, setSelected] = useState('');
 
   useEffect(() => injectStyles(), []);
+
+  // Función para limpiar rutas existentes (tomada de App.jsx)
+  const clearExistingRoutes = () => {
+    if (!map.current) return;
+    
+    // Remover capa de ruta si existe
+    if (routeLayerIdRef.current && map.current.getLayer(routeLayerIdRef.current)) {
+      map.current.removeLayer(routeLayerIdRef.current);
+    }
+    
+    // Remover fuente de ruta si existe
+    if (routeLayerIdRef.current && map.current.getSource(routeLayerIdRef.current)) {
+      map.current.removeSource(routeLayerIdRef.current);
+    }
+    
+    routeLayerIdRef.current = null;
+    setRouteInfo(null);
+  };
+
+  // Función para trazar ruta visual (tomada y adaptada de App.jsx)
+  const traceRoute = (startPoint, endPoint, routeColor = '#9c27b0', routeId = 'ambulanceRoute') => {
+    if (!map.current) {
+      console.warn("Mapa no está disponible");
+      return;
+    }
+
+    // Limpiar rutas existentes primero
+    clearExistingRoutes();
+
+    fetch(
+      `https://api.mapbox.com/directions/v5/mapbox/driving-traffic/${startPoint.lng},${startPoint.lat};${endPoint.lng},${endPoint.lat}?geometries=geojson&access_token=${mapboxgl.accessToken}`
+    )
+      .then(response => response.json())
+      .then(data => {
+        if (!data.routes || data.routes.length === 0) {
+          console.error("No se encontró ruta");
+          return;
+        }
+
+        const calculatedRoute = data.routes[0].geometry.coordinates;
+        const duration = data.routes[0].duration;
+        const distance = data.routes[0].distance;
+
+        console.log(`Ruta trazada: ${(distance / 1000).toFixed(2)} km, ${(duration / 60).toFixed(2)} min`);
+
+        // Actualizar información de la ruta
+        setRouteInfo({
+          distance: (distance / 1000).toFixed(2),
+          time: (duration / 60).toFixed(2),
+          hospital: endPoint.name
+        });
+
+        // Crear fuente GeoJSON
+        map.current.addSource(routeId, {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            geometry: {
+              type: 'LineString',
+              coordinates: calculatedRoute,
+            },
+            properties: {}
+          },
+        });
+
+        // Crear capa de línea
+        map.current.addLayer({
+          id: routeId,
+          type: 'line',
+          source: routeId,
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round',
+          },
+          paint: {
+            'line-color': routeColor,
+            'line-width': 6,
+            'line-opacity': 0.8,
+            'line-dasharray': [0.5, 0.25] // Efecto de línea punteada
+          },
+        });
+
+        routeLayerIdRef.current = routeId;
+
+        // Ajustar el mapa para mostrar la ruta completa
+        const bounds = new mapboxgl.LngLatBounds();
+        bounds.extend([startPoint.lng, startPoint.lat]);
+        bounds.extend([endPoint.lng, endPoint.lat]);
+        
+        map.current.fitBounds(bounds, {
+          padding: 100,
+          duration: 2000,
+          pitch: 45
+        });
+
+      })
+      .catch(error => console.error("Error al trazar la ruta:", error));
+  };
+
+  // Función para crear marcadores de hospitales
+  const createHospitalMarkers = () => {
+    if (!map.current || hospitalMarkersRef.current.length > 0) return;
+
+    hospitals.forEach((hospital) => {
+      const hospitalEl = document.createElement('div');
+      hospitalEl.innerHTML = `
+        <div style="
+          width: 40px;
+          height: 40px;
+          background: #4CAF50;
+          border: 3px solid white;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: white;
+          font-weight: bold;
+          font-size: 18px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        ">🏥</div>
+      `;
+      hospitalEl.style.cursor = 'pointer';
+
+      const popup = new mapboxgl.Popup({ offset: 25 })
+        .setHTML(`
+          <div style="padding: 8px;">
+            <strong>${hospital.name}</strong>
+            <br/>
+            <button onclick="window.traceToHospital('${hospital.id}')" 
+              style="
+                margin-top: 8px;
+                padding: 6px 12px;
+                background: #9c27b0;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 12px;
+              ">
+              Trazar Ruta
+            </button>
+          </div>
+        `);
+
+      const marker = new mapboxgl.Marker(hospitalEl)
+        .setLngLat([hospital.lng, hospital.lat])
+        .setPopup(popup)
+        .addTo(map.current);
+
+      hospitalMarkersRef.current.push(marker);
+
+      // Click handler para trazar ruta al hospital
+      hospitalEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        traceRoute(pos, hospital, '#9c27b0', 'hospitalRoute');
+        setDest(hospital);
+        setIsNav(true);
+      });
+    });
+
+    // Exponer función global para el popup
+    window.traceToHospital = (hospitalId) => {
+      const hospital = hospitals.find(h => h.id === hospitalId);
+      if (hospital && pos) {
+        traceRoute(pos, hospital, '#9c27b0', 'hospitalRoute');
+        setDest(hospital);
+        setIsNav(true);
+      }
+    };
+  };
 
   // Mapa inicial
   useEffect(() => {
@@ -133,6 +307,11 @@ export default function MapaOperador() {
           'fill-extrusion-opacity': 0.6
         }
       }, labelLayerId);
+
+      // Crear marcadores de hospitales después de que el mapa cargue
+      setTimeout(() => {
+        createHospitalMarkers();
+      }, 1000);
     });
 
     // Cielo y controles
@@ -170,6 +349,9 @@ export default function MapaOperador() {
 
     return () => {
       if (watchId.current) navigator.geolocation.clearWatch(watchId.current);
+      // Limpiar marcadores de hospitales
+      hospitalMarkersRef.current.forEach(marker => marker.remove());
+      hospitalMarkersRef.current = [];
       try { m.remove(); } catch {}
     };
   }, []);
@@ -211,6 +393,10 @@ export default function MapaOperador() {
           // Actualizar origen en ruta activa si estamos en navegación
           if (isNav && directions.current && dest) {
             directions.current.setOrigin([longitude, latitude]);
+            // También actualizar la ruta visual si existe
+            if (routeLayerIdRef.current) {
+              traceRoute({ lat: latitude, lng: longitude }, dest, '#9c27b0', routeLayerIdRef.current);
+            }
           }
         }
       },
@@ -234,32 +420,24 @@ export default function MapaOperador() {
     setSelected(list[0]?.id || '');
   };
 
-  // Función mejorada para iniciar navegación
+  // Función mejorada para iniciar navegación CON RUTA VISUAL
   const startNav = async (hospital) => {
     if (!pos || !hospital) return;
     
     setIsNav(true);
     setDest(hospital);
 
-    // Esperar a que el mapa esté listo
-    if (!map.current.isStyleLoaded()) {
-      map.current.once('load', () => setupRoute(hospital));
-    } else {
-      setupRoute(hospital);
-    }
-  };
+    // Trazar ruta visual inmediatamente
+    traceRoute(pos, hospital, '#9c27b0', 'ambulanceRoute');
 
-  const setupRoute = (hospital) => {
+    // Configurar directions también (como respaldo)
     const dir = directions.current;
-    
-    // Limpiar rutas anteriores
     try { 
       dir.removeRoutes(); 
     } catch (e) {
-      console.log('No routes to remove');
+      console.log('No routes to remove in directions');
     }
 
-    // Configurar origen y destino
     dir.setOrigin([pos.lng, pos.lat]);
     dir.setDestination([hospital.lng, hospital.lat]);
 
@@ -269,15 +447,10 @@ export default function MapaOperador() {
       .extend([hospital.lng, hospital.lat]);
     
     map.current.fitBounds(bounds, {
-      padding: 50,
+      padding: 100,
       duration: 2000,
       pitch: 45,
       bearing: heading
-    });
-
-    // Escuchar cuando la ruta esté cargada
-    dir.on('route', (e) => {
-      console.log('Ruta calculada:', e.route);
     });
   };
 
@@ -302,11 +475,12 @@ export default function MapaOperador() {
   const stopNavigation = () => {
     setIsNav(false);
     setDest(null);
+    clearExistingRoutes();
     if (directions.current) {
       try {
         directions.current.removeRoutes();
       } catch (e) {
-        console.log('Error removing routes:', e);
+        console.log('Error removing routes from directions:', e);
       }
     }
   };
@@ -337,6 +511,16 @@ export default function MapaOperador() {
 
       <div ref={mapContainer} className="map-container" />
 
+      {/* Información de la ruta */}
+      {routeInfo && (
+        <div className="route-info">
+          <div style={{ fontWeight: 800, marginBottom: '8px' }}>📊 Información de Ruta</div>
+          <div>🏥 <strong>{routeInfo.hospital}</strong></div>
+          <div>📏 <strong>{routeInfo.distance} km</strong></div>
+          <div>⏱️ <strong>{routeInfo.time} min</strong></div>
+        </div>
+      )}
+
       <div className="controls">
         <button className="btn btn-danger" onClick={() => { setShowForm(true); calcHospitals(); }}>
           ⚠️ EMERGENCIA
@@ -355,6 +539,20 @@ export default function MapaOperador() {
           }}
         >
           🎯 Centrar
+        </button>
+        <button
+          className="btn"
+          style={{ background: '#4CAF50' }}
+          onClick={() => {
+            if (pos && hospitalsList.length > 0) {
+              const nearestHospital = hospitalsList[0];
+              startNav(nearestHospital);
+              setNotify(`📍 Ruta al hospital más cercano: ${nearestHospital.name}`);
+              setTimeout(() => setNotify(''), 5000);
+            }
+          }}
+        >
+          🏥 Más Cercano
         </button>
       </div>
 
