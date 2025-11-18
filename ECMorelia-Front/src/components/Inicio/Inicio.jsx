@@ -106,60 +106,62 @@ const Inicio = () => {
 					</div>
 
 					{/* --- BOTONES CORREGIDOS --- 👇 */}
-					<div className="container mt-10 flex justify-center items-center flex-wrap gap-4">
+{/* --- BOTONES REORGANIZADOS Y ESTILIZADOS --- 👇 */}
+<div className="mt-10 flex flex-col items-center">
+  <h3 className="text-lg font-semibold text-bluish-gray mb-6 tracking-wide">
+    Selecciona tu rol para continuar
+  </h3>
 
-						{/* Botón Operador */}
-						<button
-							id="botonOperador"
-							// ESTADO INICIAL: Borde coral, texto coral, fondo transparente.
-							// ESTADO HOVER: Fondo gradiente coral, texto blanco.
-							// Eliminamos el `<span>` interior y aplicamos padding/estilos directamente al botón.
-							className="px-5 py-2.5 relative rounded-lg border-2 border-coral-red text-coral-red bg-transparent text-xl font-medium hover:text-white hover:bg-gradient-to-br from-coral-red to-red-400 focus:ring-4 focus:outline-none focus:ring-red-300 dark:focus:ring-red-800 transition-colors duration-150 ease-in mb-2 me-2"
-							onClick={() => handleButtonClick("operador")}
-						>
-							Operador
-						</button>
+  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    {/* Botón Operador */}
+    <button
+      id="botonOperador"
+      className="px-6 py-3 rounded-xl border-2 border-coral-red text-coral-red text-lg font-semibold 
+      hover:text-white hover:bg-gradient-to-br from-coral-red to-red-400 
+      transition-all duration-300 shadow-md hover:shadow-xl"
+      onClick={() => handleButtonClick("operador")}
+    >
+      Operador
+    </button>
 
-						{/* Botón Personal Paramédico (mismo estilo que Operador) */}
-						<button
-							id="botonParamedico"
-							className="px-5 py-2.5 relative rounded-lg border-2 border-coral-red text-coral-red bg-transparent text-xl font-medium hover:text-white hover:bg-gradient-to-br from-coral-red to-red-400 focus:ring-4 focus:outline-none focus:ring-red-300 dark:focus:ring-red-800 transition-colors duration-150 ease-in mb-2 me-2"
-							onClick={() => handleButtonClick("paramedicos")}
-						>
-							Personal Paramédico
-						</button>
+    {/* Botón Personal Paramédico */}
+    <button
+      id="botonParamedico"
+      className="px-6 py-3 rounded-xl border-2 border-coral-red text-coral-red text-lg font-semibold 
+      hover:text-white hover:bg-gradient-to-br from-coral-red to-red-400 
+      transition-all duration-300 shadow-md hover:shadow-xl"
+      onClick={() => handleButtonClick("paramedicos")}
+    >
+      Personal Paramédico
+    </button>
 
-						{/* Botón Hospital */}
-						<button
-							id="botonHospital"
-							// ESTADO INICIAL: Borde azul, texto azul, fondo transparente.
-							// ESTADO HOVER: Fondo gradiente azul, texto blanco.
-							className="px-5 py-2.5 relative rounded-lg border-2 border-sky-blue text-sky-blue bg-transparent text-xl font-medium hover:text-white hover:bg-gradient-to-br from-sky-blue to-blue-400 focus:ring-4 focus:outline-none focus:ring-blue-300 dark:focus:ring-blue-800 transition-colors duration-150 ease-in mb-2 me-2"
-							onClick={() => handleButtonClick("hospital")}
-						>
-							Hospital
-						</button>
+    {/* Botón Hospital */}
+    <button
+      id="botonHospital"
+      className="px-6 py-3 rounded-xl border-2 border-sky-blue text-sky-blue text-lg font-semibold 
+      hover:text-white hover:bg-gradient-to-br from-sky-blue to-blue-400 
+      transition-all duration-300 shadow-md hover:shadow-xl"
+      onClick={() => handleButtonClick("hospital")}
+    >
+      Hospital
+    </button>
 
-						{/* Botón Doctor (mismo estilo que Hospital) */}
-						<button
-							id="botonDoctor"
-							className="px-5 py-2.5 relative rounded-lg border-2 border-sky-blue text-sky-blue bg-transparent text-xl font-medium hover:text-white hover:bg-gradient-to-br from-sky-blue to-blue-400 focus:ring-4 focus:outline-none focus:ring-blue-300 dark:focus:ring-blue-800 transition-colors duration-150 ease-in mb-2 me-2"
-							onClick={() => handleButtonClick("doctor")}
-						>
-							Doctor
-						</button>
+    {/* Botón Doctor */}
+    <button
+      id="botonDoctor"
+      className="px-6 py-3 rounded-xl border-2 border-sky-blue text-sky-blue text-lg font-semibold 
+      hover:text-white hover:bg-gradient-to-br from-sky-blue to-blue-400 
+      transition-all duration-300 shadow-md hover:shadow-xl"
+      onClick={() => handleButtonClick("doctor")}
+    >
+      Doctor
+    </button>
+  </div>
+</div>
 
-						{/* Botón Llamada */}
-						<button
-							id="botonLlamada"
-							// ESTADO INICIAL: Borde verde, texto verde, fondo transparente.
-							// ESTADO HOVER: Fondo gradiente verde, texto blanco.
-							className="px-5 py-2.5 relative rounded-lg border-2 border-mint-green text-mint-green bg-transparent text-xl font-medium hover:text-white hover:bg-gradient-to-br from-mint-green to-green-400 focus:ring-4 focus:outline-none focus:ring-green-300 dark:focus:ring-green-800 transition-colors duration-150 ease-in mb-2 me-2"
-							onClick={() => navigate("/videocall")} //
-						>
-							Llamada
-						</button>
-					</div>
+
+
+
 				</div>
 			</section>
 		</div>

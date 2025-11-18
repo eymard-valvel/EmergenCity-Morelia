@@ -4,16 +4,7 @@ import MapboxDirections from '@mapbox/mapbox-gl-directions/dist/mapbox-gl-direct
 import '@mapbox/mapbox-gl-directions/dist/mapbox-gl-directions.css';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
-mapboxgl.accessToken = 'pk.eyJ1IjoiZWR1IjoiZWR1YXJkbzI1MGplbW0iLCJhIjoiY2xwYzVvdzc3MDNlYjJoazUzbzZsYjRwNiJ9.KsDXLdjWn2R4fMX-YIIU8g';
-
-const hospitals = [
-  { id: 'h1', name: 'Hospital Star Medica', lng: -101.191438, lat: 19.682937 },
-  { id: 'h2', name: 'IMSS Hospital General Zona 83 Morelia', lng: -101.17451, lat: 19.68219 },
-  { id: 'h3', name: 'IMSS Hospital General Regional 1 Charo', lng: -101.09293, lat: 19.72438 },
-  { id: 'h4', name: 'Clínica ISSSTE', lng: -101.18061, lat: 19.72833 },
-  { id: 'h5', name: 'Hospital Acueducto S.A. de C.V.', lng: -101.172244, lat: 19.697744 },
-  { id: 'h6', name: 'Hospital Regional Patzcuaro', lng: -101.606262, lat: 19.515874 }
-];
+mapboxgl.accessToken = 'pk.eyJ1IjoiZWR1YXJkbzI1MGplbW0iLCJhIjoiY2xwYzVvdzc3MDNlYjJoazUzbzZsYjRwNiJ9.KsDXLdjWn2R4fMX-YIIU8g';
 
 const injectStyles = () => {
   const css = `
@@ -25,6 +16,9 @@ const injectStyles = () => {
   .btn { padding:10px 14px; border:none; border-radius:8px; cursor:pointer; font-weight:700; color:#fff; }
   .btn-danger { background:#ff5252; }
   .btn-primary { background:#1f7bd3; }
+  .btn-warning { background:#ff9800; }
+  .btn-success { background:#4caf50; }
+  .btn:disabled { background:#666; cursor:not-allowed; opacity:0.6; }
   .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; justify-content:center; align-items:center; z-index:90; }
   .modal { background:#09141c; padding:18px; border-radius:10px; width:min(700px,95%); }
   .input, select { width:100%; padding:10px; border-radius:8px; background:#061018; border:1px solid rgba(255,255,255,0.06); color:#fff; }
@@ -35,6 +29,14 @@ const injectStyles = () => {
   .ambulance-marker svg { filter:drop-shadow(0 6px 12px rgba(0,0,0,0.6)); transition:transform 300ms linear; }
   .route-info { position:absolute; top:80px; left:20px; background:rgba(11,23,34,0.95); padding:15px; border-radius:8px; color:white; z-index:1; max-width:300px; border:2px solid #00FFFC; box-shadow:0 0 20px rgba(0, 255, 252, 0.5); }
   .glowing-route { animation: glow 1.5s ease-in-out infinite alternate; }
+  .notification-alert { position:fixed; top:20px; right:20px; background:#1a3a26; color:#fff; padding:14px 20px; border-radius:10px; font-weight:700; box-shadow:0 8px 20px rgba(0,0,0,0.6); z-index:200; opacity:0; transform:translateX(100px); transition:all .4s ease; }
+  .notification-alert.show { opacity:1; transform:translateX(0); }
+  .hospital-status { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:8px; }
+  .hospital-status.connected { background:#4caf50; }
+  .hospital-status.disconnected { background:#ff5252; }
+  .connection-status { position:absolute; top:10px; right:10px; background:rgba(11,23,34,0.9); padding:8px 12px; border-radius:6px; font-size:12px; z-index:1; }
+  .connection-status.connected { border-left:3px solid #4caf50; }
+  .connection-status.disconnected { border-left:3px solid #ff5252; }
   @keyframes glow {
     from { box-shadow: 0 0 10px #00FFFC, 0 0 20px #00FFFC; }
     to { box-shadow: 0 0 15px #00FFFC, 0 0 30px #00FFFC, 0 0 40px #00FFFC; }
@@ -91,7 +93,9 @@ export default function MapaOperador() {
   const watchId = useRef(null);
   const prev = useRef(null);
   const hospitalMarkersRef = useRef([]);
-  const routeLayerIdsRef = useRef([]); // Cambiado a array para manejar múltiples capas
+  const routeLayerIdsRef = useRef([]);
+  const ws = useRef(null);
+  const reconnectTimeout = useRef(null);
 
   const [pos, setPos] = useState(null);
   const [speed, setSpeed] = useState(0);
@@ -101,6 +105,9 @@ export default function MapaOperador() {
   const [showForm, setShowForm] = useState(false);
   const [notify, setNotify] = useState('');
   const [routeInfo, setRouteInfo] = useState(null);
+  const [hospitalNotification, setHospitalNotification] = useState(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState('Desconectado');
 
   const [age, setAge] = useState('');
   const [sex, setSex] = useState('');
@@ -110,13 +117,171 @@ export default function MapaOperador() {
 
   useEffect(() => injectStyles(), []);
 
-  // Función MEJORADA para limpiar TODAS las rutas existentes
+  // WebSocket mejorado con reconexión automática
+  const connectWebSocket = () => {
+    try {
+      console.log('🔗 Conectando al WebSocket...');
+      setConnectionStatus('Conectando...');
+      
+      ws.current = new WebSocket('ws://localhost:3002/ws');
+      
+      ws.current.onopen = () => {
+        console.log('✅ Operador conectado al servidor WebSocket');
+        setWsConnected(true);
+        setConnectionStatus('Conectado');
+        
+        // Registrar ambulancia
+        ws.current.send(JSON.stringify({
+          type: 'register_ambulance',
+          ambulance: {
+            id: 'UVI-01',
+            placa: 'ABC123',
+            tipo: 'UVI Móvil',
+            status: 'disponible'
+          }
+        }));
+
+        setNotify('✅ Conectado al servidor');
+        setTimeout(() => setNotify(''), 3000);
+      };
+
+      ws.current.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('📨 Mensaje recibido en operador:', data.type);
+          
+          switch (data.type) {
+            case 'connection_established':
+              console.log('✅ Conexión WebSocket confirmada');
+              setNotify('✅ Conexión establecida con servidor');
+              setTimeout(() => setNotify(''), 3000);
+              break;
+              
+            case 'active_hospitals_update':
+              console.log('🏥 Hospitales activos actualizados:', data.hospitals);
+              setHospitalsList(data.hospitals || []);
+              
+              // Si el mapa está listo, actualizar marcadores
+              if (map.current) {
+                updateHospitalMarkers(data.hospitals || []);
+              }
+              
+              if (data.hospitals && data.hospitals.length > 0) {
+                setNotify(`🏥 ${data.hospitals.length} hospitales conectados`);
+                setTimeout(() => setNotify(''), 3000);
+              }
+              break;
+              
+            case 'hospital_note':
+              setNotify(`📝 Nota del hospital: ${data.note?.message || 'Mensaje recibido'}`);
+              setTimeout(() => setNotify(''), 5000);
+              break;
+              
+            case 'patient_accepted':
+              setHospitalNotification({
+                type: 'accepted',
+                message: `✅ ${data.hospitalInfo?.nombre || 'Hospital'} ha aceptado al paciente`,
+                hospitalInfo: data.hospitalInfo
+              });
+              setTimeout(() => setHospitalNotification(null), 5000);
+              break;
+              
+            case 'patient_rejected':
+              setHospitalNotification({
+                type: 'rejected',
+                message: `❌ ${data.hospitalInfo?.nombre || 'Hospital'} no puede aceptar al paciente. Razón: ${data.reason}`,
+                hospitalInfo: data.hospitalInfo
+              });
+              setTimeout(() => setHospitalNotification(null), 5000);
+              break;
+
+            case 'notification_sent':
+              setNotify(`📋 ${data.message || 'Notificación enviada al hospital'}`);
+              setTimeout(() => setNotify(''), 3000);
+              break;
+              
+            case 'pong':
+              // Respuesta a ping, conexión activa
+              break;
+              
+            case 'error':
+              console.error('❌ Error del servidor:', data.message);
+              setNotify(`❌ Error: ${data.message}`);
+              setTimeout(() => setNotify(''), 5000);
+              break;
+              
+            default:
+              console.log('📨 Mensaje recibido:', data);
+          }
+        } catch (error) {
+          console.error('❌ Error procesando mensaje:', error);
+        }
+      };
+
+      ws.current.onclose = (event) => {
+        console.log('🔌 WebSocket cerrado:', event.code, event.reason);
+        setWsConnected(false);
+        setConnectionStatus('Desconectado');
+        
+        if (event.code !== 1000) {
+          console.log('🔄 Intentando reconexión en 3 segundos...');
+          setNotify('🔌 Conexión perdida. Reconectando...');
+          
+          reconnectTimeout.current = setTimeout(() => {
+            connectWebSocket();
+          }, 3000);
+        }
+      };
+
+      ws.current.onerror = (error) => {
+        console.error('❌ Error WebSocket:', error);
+        setWsConnected(false);
+        setConnectionStatus('Error de conexión');
+        setNotify('❌ Error de conexión con el servidor');
+      };
+
+    } catch (error) {
+      console.error('❌ Error al conectar WebSocket:', error);
+      setConnectionStatus('Error de conexión');
+    }
+  };
+
+  useEffect(() => {
+    connectWebSocket();
+
+    return () => {
+      if (reconnectTimeout.current) {
+        clearTimeout(reconnectTimeout.current);
+      }
+      if (ws.current) {
+        ws.current.close(1000, 'Componente desmontado');
+      }
+    };
+  }, []);
+
+  // Enviar actualización de ubicación al servidor
+  useEffect(() => {
+    if (pos && ws.current && ws.current.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify({
+        type: 'location_update',
+        ambulanceId: 'UVI-01',
+        location: {
+          lat: pos.lat,
+          lng: pos.lng,
+          heading: heading,
+          speed: speed
+        },
+        speed: speed,
+        status: isNav ? 'en_ruta' : 'disponible'
+      }));
+    }
+  }, [pos, speed, heading, isNav]);
+
+  // Función para limpiar rutas
   const clearExistingRoutes = () => {
     if (!map.current) return;
     
-    // Limpiar todas las capas de ruta
     routeLayerIdsRef.current.forEach(layerId => {
-      // Remover capas principales y sus efectos
       const layersToRemove = [
         layerId,
         layerId + '-glow',
@@ -129,7 +294,6 @@ export default function MapaOperador() {
         }
       });
       
-      // Remover fuentes
       if (map.current.getSource(layerId)) {
         map.current.removeSource(layerId);
       }
@@ -139,140 +303,181 @@ export default function MapaOperador() {
     setRouteInfo(null);
   };
 
-  // Función MEJORADA para trazar ruta visual
+  // Función para trazar ruta
   const traceRoute = (startPoint, endPoint, routeId = 'ambulanceRoute') => {
-    if (!map.current) {
-      console.warn("Mapa no está disponible");
-      return;
-    }
+    return new Promise((resolve, reject) => {
+      if (!map.current) {
+        reject(new Error("Mapa no está disponible"));
+        return;
+      }
 
-    // Limpiar rutas existentes primero
-    clearExistingRoutes();
+      clearExistingRoutes();
 
-    fetch(
-      `https://api.mapbox.com/directions/v5/mapbox/driving-traffic/${startPoint.lng},${startPoint.lat};${endPoint.lng},${endPoint.lat}?geometries=geojson&access_token=${mapboxgl.accessToken}`
-    )
-      .then(response => response.json())
-      .then(data => {
-        if (!data.routes || data.routes.length === 0) {
-          console.error("No se encontró ruta");
-          return;
-        }
+      fetch(
+        `https://api.mapbox.com/directions/v5/mapbox/driving-traffic/${startPoint.lng},${startPoint.lat};${endPoint.lng},${endPoint.lat}?geometries=geojson&access_token=${mapboxgl.accessToken}`
+      )
+        .then(response => response.json())
+        .then(data => {
+          if (!data.routes || data.routes.length === 0) {
+            reject(new Error("No se encontró ruta"));
+            return;
+          }
 
-        const calculatedRoute = data.routes[0].geometry.coordinates;
-        const duration = data.routes[0].duration;
-        const distance = data.routes[0].distance;
+          const calculatedRoute = data.routes[0].geometry.coordinates;
+          const duration = data.routes[0].duration;
+          const distance = data.routes[0].distance;
 
-        console.log(`Ruta trazada: ${(distance / 1000).toFixed(2)} km, ${(duration / 60).toFixed(2)} min`);
+          console.log(`Ruta trazada: ${(distance / 1000).toFixed(2)} km, ${(duration / 60).toFixed(2)} min`);
 
-        // Actualizar información de la ruta
-        setRouteInfo({
-          distance: (distance / 1000).toFixed(2),
-          time: (duration / 60).toFixed(2),
-          hospital: endPoint.name
-        });
+          setRouteInfo({
+            distance: (distance / 1000).toFixed(2),
+            time: (duration / 60).toFixed(2),
+            hospital: endPoint.name
+          });
 
-        // COLOR CIAN FOSFORECENTE - Muy llamativo y visible
-        const routeColor = '#00FFFC';
+          const routeColor = '#00FFFC';
 
-        // Crear fuente GeoJSON
-        map.current.addSource(routeId, {
-          type: 'geojson',
-          data: {
-            type: 'Feature',
-            geometry: {
-              type: 'LineString',
-              coordinates: calculatedRoute,
+          map.current.addSource(routeId, {
+            type: 'geojson',
+            data: {
+              type: 'Feature',
+              geometry: {
+                type: 'LineString',
+                coordinates: calculatedRoute,
+              },
+              properties: {}
             },
-            properties: {}
-          },
+          });
+
+          map.current.addLayer({
+            id: routeId,
+            type: 'line',
+            source: routeId,
+            layout: {
+              'line-join': 'round',
+              'line-cap': 'round'
+            },
+            paint: {
+              'line-color': routeColor,
+              'line-width': 8,
+              'line-opacity': 0.95,
+              'line-blur': 0.3,
+            },
+          });
+
+          map.current.addLayer({
+            id: routeId + '-glow',
+            type: 'line',
+            source: routeId,
+            layout: {
+              'line-join': 'round',
+              'line-cap': 'round'
+            },
+            paint: {
+              'line-color': routeColor,
+              'line-width': 15,
+              'line-opacity': 0.4,
+              'line-blur': 1.5
+            },
+          }, routeId);
+
+          map.current.addLayer({
+            id: routeId + '-outline',
+            type: 'line',
+            source: routeId,
+            layout: {
+              'line-join': 'round',
+              'line-cap': 'round'
+            },
+            paint: {
+              'line-color': '#FFFFFF',
+              'line-width': 12,
+              'line-opacity': 0.2,
+              'line-blur': 0.8
+            },
+          }, routeId + '-glow');
+
+          routeLayerIdsRef.current = [
+            routeId,
+            routeId + '-glow',
+            routeId + '-outline'
+          ];
+
+          const bounds = new mapboxgl.LngLatBounds();
+          bounds.extend([startPoint.lng, startPoint.lat]);
+          bounds.extend([endPoint.lng, endPoint.lat]);
+          
+          map.current.fitBounds(bounds, {
+            padding: 100,
+            duration: 2000,
+            pitch: 45
+          });
+
+          resolve({
+            distance: (distance / 1000).toFixed(2),
+            time: (duration / 60).toFixed(2),
+            routeGeometry: calculatedRoute // Nueva: incluir geometría de la ruta
+          });
+        })
+        .catch(error => {
+          console.error("Error al trazar la ruta:", error);
+          reject(error);
         });
-
-        // Crear capa de línea principal
-        map.current.addLayer({
-          id: routeId,
-          type: 'line',
-          source: routeId,
-          layout: {
-            'line-join': 'round',
-            'line-cap': 'round'
-          },
-          paint: {
-            'line-color': routeColor,
-            'line-width': 8,
-            'line-opacity': 0.95,
-            'line-blur': 0.3,
-          },
-        });
-
-        // Agregar efecto de brillo exterior
-        map.current.addLayer({
-          id: routeId + '-glow',
-          type: 'line',
-          source: routeId,
-          layout: {
-            'line-join': 'round',
-            'line-cap': 'round'
-          },
-          paint: {
-            'line-color': routeColor,
-            'line-width': 15,
-            'line-opacity': 0.4,
-            'line-blur': 1.5
-          },
-        }, routeId);
-
-        // Agregar efecto de contorno brillante
-        map.current.addLayer({
-          id: routeId + '-outline',
-          type: 'line',
-          source: routeId,
-          layout: {
-            'line-join': 'round',
-            'line-cap': 'round'
-          },
-          paint: {
-            'line-color': '#FFFFFF',
-            'line-width': 12,
-            'line-opacity': 0.2,
-            'line-blur': 0.8
-          },
-        }, routeId + '-glow');
-
-        // Guardar IDs de las capas creadas
-        routeLayerIdsRef.current = [
-          routeId,
-          routeId + '-glow',
-          routeId + '-outline'
-        ];
-
-        // Ajustar el mapa para mostrar la ruta completa
-        const bounds = new mapboxgl.LngLatBounds();
-        bounds.extend([startPoint.lng, startPoint.lat]);
-        bounds.extend([endPoint.lng, endPoint.lat]);
-        
-        map.current.fitBounds(bounds, {
-          padding: 100,
-          duration: 2000,
-          pitch: 45
-        });
-
-      })
-      .catch(error => console.error("Error al trazar la ruta:", error));
+    });
   };
 
-  // Función MEJORADA para crear marcadores de hospitales
-  const createHospitalMarkers = () => {
-    if (!map.current || hospitalMarkersRef.current.length > 0) return;
+  // Función para notificar al hospital sobre traslado
+  const notifyHospital = (hospital, patientInfo, eta, distance, routeGeometry) => {
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      
+      console.log('📤 Enviando notificación al hospital:', {
+        hospitalId: hospital.id,
+        hospitalName: hospital.name,
+        patientInfo: patientInfo,
+        eta: eta,
+        distance: distance,
+        hasRouteGeometry: !!routeGeometry
+      });
+      
+      ws.current.send(JSON.stringify({
+        type: 'patient_transfer_notification',
+        ambulanceId: 'UVI-01',
+        hospitalId: hospital.id,
+        patientInfo: patientInfo,
+        eta: eta,
+        distance: distance,
+        routeGeometry: routeGeometry // Nueva: enviar geometría de la ruta
+      }));
+      
+      console.log(`📋 Notificación enviada al hospital: ${hospital.name}`);
+    } else {
+      console.error('❌ No hay conexión WebSocket para enviar notificación');
+      setNotify('❌ No hay conexión con el servidor. No se pudo notificar al hospital.');
+      setTimeout(() => setNotify(''), 5000);
+    }
+  };
+
+  // Actualizar marcadores de hospitales dinámicamente
+  const updateHospitalMarkers = (hospitals) => {
+    if (!map.current) return;
+
+    // Limpiar marcadores antiguos
+    hospitalMarkersRef.current.forEach(marker => marker.remove());
+    hospitalMarkersRef.current = [];
 
     hospitals.forEach((hospital) => {
+      if (!hospital.lat || !hospital.lng) {
+        console.warn('Hospital sin coordenadas:', hospital);
+        return;
+      }
+
       const hospitalEl = document.createElement('div');
       hospitalEl.innerHTML = `
         <div style="
           width: 40px;
           height: 40px;
-          background: #FF4444;
-          border: 3px solid white;
+          background: ${hospital.connected ? '#FF4444' : '#666'};
+          border: 3px solid ${hospital.connected ? 'white' : '#999'};
           border-radius: 50%;
           display: flex;
           align-items: center;
@@ -281,15 +486,25 @@ export default function MapaOperador() {
           font-weight: bold;
           font-size: 18px;
           box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+          opacity: ${hospital.connected ? '1' : '0.6'};
         ">🏥</div>
       `;
-      hospitalEl.style.cursor = 'pointer';
+      hospitalEl.style.cursor = hospital.connected ? 'pointer' : 'not-allowed';
 
       const popup = new mapboxgl.Popup({ offset: 25 })
         .setHTML(`
-          <div style="padding: 8px;">
+          <div style="padding: 8px; max-width: 250px;">
             <strong>${hospital.name}</strong>
-            <br/>
+            <div style="font-size: 12px; margin: 4px 0;">
+              <span class="hospital-status ${hospital.connected ? 'connected' : 'disconnected'}"></span>
+              ${hospital.connected ? 'Conectado' : 'Desconectado'}
+            </div>
+            <div style="font-size: 12px; margin: 4px 0;">📍 ${hospital.ubicacion}</div>
+            ${hospital.especialidades && hospital.especialidades.length > 0 ? 
+              `<div style="font-size: 11px; margin: 4px 0;">🏥 ${hospital.especialidades.join(', ')}</div>` : ''}
+            ${hospital.camasDisponibles ? 
+              `<div style="font-size: 11px; margin: 4px 0;">🛏️ ${hospital.camasDisponibles} camas disponibles</div>` : ''}
+            ${hospital.connected ? `
             <button onclick="window.traceToHospital('${hospital.id}')" 
               style="
                 margin-top: 8px;
@@ -302,9 +517,11 @@ export default function MapaOperador() {
                 font-size: 12px;
                 font-weight: bold;
                 box-shadow: 0 0 10px #00FFFC;
+                width: 100%;
               ">
               🚑 Trazar Ruta
-            </button>
+            </button>` : 
+            '<div style="margin-top: 8px; padding: 8px; background: #666; color: white; text-align: center; border-radius: 4px; font-size: 12px;">Hospital no disponible</div>'}
           </div>
         `);
 
@@ -315,37 +532,214 @@ export default function MapaOperador() {
 
       hospitalMarkersRef.current.push(marker);
 
-      // Click handler MEJORADO para trazar ruta al hospital
-      hospitalEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        // Limpiar ruta anterior y trazar nueva
-        clearExistingRoutes();
-        traceRoute(pos, hospital, 'hospitalRoute');
-        setDest(hospital);
-        setIsNav(true);
-      });
+      if (hospital.connected) {
+        hospitalEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          clearExistingRoutes();
+          traceRoute(pos, hospital, 'hospitalRoute');
+          setDest(hospital);
+          setIsNav(true);
+        });
+      }
     });
 
-    // Exponer función global MEJORADA para el popup
+    // Función global para trazar ruta desde popup
     window.traceToHospital = (hospitalId) => {
       const hospital = hospitals.find(h => h.id === hospitalId);
-      if (hospital && pos) {
-        // Limpiar ruta anterior y trazar nueva
+      if (hospital && hospital.connected && pos) {
         clearExistingRoutes();
         traceRoute(pos, hospital, 'hospitalRoute');
         setDest(hospital);
         setIsNav(true);
+      } else if (!hospital.connected) {
+        setNotify('❌ Hospital no disponible. Seleccione otro hospital.');
+        setTimeout(() => setNotify(''), 3000);
       }
     };
   };
 
-  // Mapa inicial
+  // Solicitar lista actualizada de hospitales
+  const refreshHospitalsList = () => {
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify({
+        type: 'request_hospitals_list'
+      }));
+      setNotify('🔄 Actualizando lista de hospitales...');
+      setTimeout(() => setNotify(''), 2000);
+    } else {
+      setNotify('❌ No hay conexión con el servidor');
+    }
+  };
+
+  // Calcular hospitales más cercanos
+  const calcHospitals = () => {
+    if (!pos) {
+      setNotify('❌ Esperando ubicación GPS...');
+      setTimeout(() => setNotify(''), 3000);
+      return;
+    }
+    
+    // Filtrar solo hospitales conectados
+    const connectedHospitals = hospitalsList.filter(h => h.connected);
+    
+    if (connectedHospitals.length === 0) {
+      setNotify('❌ No hay hospitales conectados disponibles');
+      setTimeout(() => setNotify(''), 3000);
+      return;
+    }
+
+    const list = connectedHospitals.map((h) => ({
+      ...h,
+      dist: haversine(pos.lat, pos.lng, h.lat, h.lng)
+    }));
+    
+    list.sort((a, b) => a.dist - b.dist);
+    setHospitalsList(list);
+    setSelected(list[0]?.id || '');
+    
+    setNotify(`📍 ${list.length} hospitales conectados encontrados`);
+    setTimeout(() => setNotify(''), 3000);
+  };
+
+  // Función para iniciar navegación
+  const startNav = async (hospital) => {
+    if (!pos || !hospital) {
+      throw new Error('Ubicación u hospital no disponibles');
+    }
+    
+    if (!hospital.connected) {
+      throw new Error('Hospital no disponible. Seleccione otro hospital.');
+    }
+    
+    setIsNav(true);
+    setDest(hospital);
+
+    // Trazar ruta visual inmediatamente
+    const routeResult = await traceRoute(pos, hospital, 'ambulanceRoute');
+
+    // Configurar directions también (como respaldo)
+    const dir = directions.current;
+    try { 
+      dir.removeRoutes(); 
+    } catch (e) {
+      console.log('No routes to remove in directions');
+    }
+
+    dir.setOrigin([pos.lng, pos.lat]);
+    dir.setDestination([hospital.lng, hospital.lat]);
+
+    // Ajustar cámara para mostrar la ruta completa
+    const bounds = new mapboxgl.LngLatBounds()
+      .extend([pos.lng, pos.lat])
+      .extend([hospital.lng, hospital.lat]);
+    
+    map.current.fitBounds(bounds, {
+      padding: 100,
+      duration: 2000,
+      pitch: 45,
+      bearing: heading
+    });
+
+    return routeResult;
+  };
+
+  const confirm = async () => {
+    // Validaciones mejoradas con mensajes específicos
+    if (!age) {
+      alert('Por favor ingresa la edad del paciente.');
+      return;
+    }
+    
+    if (!sex) {
+      alert('Por favor selecciona el sexo del paciente.');
+      return;
+    }
+    
+    if (!type) {
+      alert('Por favor ingresa el tipo de emergencia.');
+      return;
+    }
+    
+    const hospital = hospitalsList.find((h) => h.id === selected && h.connected);
+    if (!hospital) {
+      alert('Por favor selecciona un hospital conectado disponible.');
+      return;
+    }
+
+    if (!pos) {
+      alert('No se puede obtener la ubicación actual. Esperando GPS...');
+      return;
+    }
+
+    try {
+      // Iniciar navegación
+      const routeResult = await startNav(hospital);
+      
+      // Preparar información del paciente
+      const patientInfo = {
+        age: age,
+        sex: sex,
+        type: type,
+        timestamp: new Date().toLocaleString()
+      };
+
+      // Enviar notificación al hospital CON LA GEOMETRÍA DE LA RUTA
+      notifyHospital(
+        hospital, 
+        patientInfo, 
+        routeResult?.time || 'Calculando...', 
+        routeResult?.distance || 'Calculando...',
+        routeResult?.routeGeometry // Nueva: enviar geometría de la ruta
+      );
+
+      setShowForm(false);
+      setNotify(`✅ Reporte enviado a ${hospital.name}. Ruta trazada.`);
+      setTimeout(() => setNotify(''), 5000);
+      
+      // Limpiar formulario
+      setAge('');
+      setSex('');
+      setType('');
+      setSelected('');
+      
+    } catch (error) {
+      console.error('Error al confirmar emergencia:', error);
+      alert('Error al procesar la emergencia: ' + error.message);
+    }
+  };
+
+  const stopNavigation = () => {
+    setIsNav(false);
+    setDest(null);
+    clearExistingRoutes();
+    
+    if (directions.current) {
+      try {
+        directions.current.removeRoutes();
+      } catch (e) {
+        console.log('Error removing routes from directions:', e);
+      }
+    }
+    
+    setNotify('❌ Navegación cancelada. Ruta eliminada.');
+    setTimeout(() => setNotify(''), 3000);
+  };
+
+  // Reconectar manualmente
+  const reconnectWebSocket = () => {
+    if (reconnectTimeout.current) {
+      clearTimeout(reconnectTimeout.current);
+    }
+    connectWebSocket();
+  };
+
+  // Mapa inicial con estilo corregido
   useEffect(() => {
     if (!mapContainer.current) return;
 
     const m = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/navigation-night-v1',
+      style: 'mapbox://styles/mapbox/dark-v11',
       center: [-101.1969, 19.7024],
       zoom: 15,
       pitch: 55,
@@ -353,35 +747,8 @@ export default function MapaOperador() {
       antialias: true
     });
 
-    m.on('load', () => {
-      // Edificios 3D
-      const layers = m.getStyle().layers;
-      const labelLayerId = layers.find((l) => l.type === 'symbol' && l.layout['text-field'])?.id;
-      m.addLayer({
-        id: '3d-buildings',
-        source: 'composite',
-        'source-layer': 'building',
-        filter: ['==', 'extrude', 'true'],
-        type: 'fill-extrusion',
-        minzoom: 15,
-        paint: {
-          'fill-extrusion-color': '#aaa',
-          'fill-extrusion-height': ['get', 'height'],
-          'fill-extrusion-base': ['get', 'min_height'],
-          'fill-extrusion-opacity': 0.6
-        }
-      }, labelLayerId);
-
-      // Crear marcadores de hospitales después de que el mapa cargue
-      setTimeout(() => {
-        createHospitalMarkers();
-      }, 1000);
-    });
-
-    // Cielo y controles
     m.addControl(new mapboxgl.NavigationControl(), 'top-right');
 
-    // Dirección con estilo personalizado para ruta CIAN
     const dir = new MapboxDirections({
       accessToken: mapboxgl.accessToken,
       unit: 'metric',
@@ -411,6 +778,31 @@ export default function MapaOperador() {
     marker.current = new mapboxgl.Marker({ element: ambulanceMarker(), anchor: 'center' });
     map.current = m;
 
+    m.on('load', () => {
+      console.log('🗺️ Mapa cargado correctamente');
+      
+      // Agregar capa de edificios 3D si existe en este estilo
+      const layers = m.getStyle().layers;
+      const labelLayerId = layers.find((l) => l.type === 'symbol' && l.layout['text-field'])?.id;
+      
+      if (m.getSource('composite')) {
+        m.addLayer({
+          id: '3d-buildings',
+          source: 'composite',
+          'source-layer': 'building',
+          filter: ['==', 'extrude', 'true'],
+          type: 'fill-extrusion',
+          minzoom: 15,
+          paint: {
+            'fill-extrusion-color': '#aaa',
+            'fill-extrusion-height': ['get', 'height'],
+            'fill-extrusion-base': ['get', 'min_height'],
+            'fill-extrusion-opacity': 0.6
+          }
+        }, labelLayerId);
+      }
+    });
+
     return () => {
       if (watchId.current) navigator.geolocation.clearWatch(watchId.current);
       hospitalMarkersRef.current.forEach(marker => marker.remove());
@@ -421,7 +813,10 @@ export default function MapaOperador() {
 
   // GPS en tiempo real
   useEffect(() => {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation) {
+      setNotify('❌ Geolocalización no soportada');
+      return;
+    }
     
     watchId.current = navigator.geolocation.watchPosition(
       (p) => {
@@ -460,7 +855,11 @@ export default function MapaOperador() {
           }
         }
       },
-      (err) => console.error('GPS error:', err),
+      (err) => {
+        console.error('GPS error:', err);
+        setNotify('❌ Error de GPS');
+        setTimeout(() => setNotify(''), 3000);
+      },
       { enableHighAccuracy: true, maximumAge: 1000, timeout: 5000 }
     );
     
@@ -469,95 +868,38 @@ export default function MapaOperador() {
     };
   }, [isNav, dest]);
 
-  const calcHospitals = () => {
-    if (!pos) return;
-    const list = hospitals.map((h) => ({
-      ...h,
-      dist: haversine(pos.lat, pos.lng, h.lat, h.lng)
-    }));
-    list.sort((a, b) => a.dist - b.dist);
-    setHospitalsList(list);
-    setSelected(list[0]?.id || '');
-  };
-
-  // Función MEJORADA para iniciar navegación
-  const startNav = async (hospital) => {
-    if (!pos || !hospital) return;
-    
-    setIsNav(true);
-    setDest(hospital);
-
-    // Trazar ruta visual inmediatamente
-    traceRoute(pos, hospital, 'ambulanceRoute');
-
-    // Configurar directions también (como respaldo)
-    const dir = directions.current;
-    try { 
-      dir.removeRoutes(); 
-    } catch (e) {
-      console.log('No routes to remove in directions');
-    }
-
-    dir.setOrigin([pos.lng, pos.lat]);
-    dir.setDestination([hospital.lng, hospital.lat]);
-
-    // Ajustar cámara para mostrar la ruta completa
-    const bounds = new mapboxgl.LngLatBounds()
-      .extend([pos.lng, pos.lat])
-      .extend([hospital.lng, hospital.lat]);
-    
-    map.current.fitBounds(bounds, {
-      padding: 100,
-      duration: 2000,
-      pitch: 45,
-      bearing: heading
-    });
-  };
-
-  const confirm = async () => {
-    if (!age || !sex || !type) {
-      alert('Completa todos los campos.');
-      return;
-    }
-    
-    const hospital = hospitalsList.find((h) => h.id === selected);
-    if (!hospital) {
-      alert('Selecciona un hospital.');
-      return;
-    }
-    
-    await startNav(hospital);
-    setShowForm(false);
-    setNotify(`✅ Reporte enviado a ${hospital.name}. Ruta trazada.`);
-    setTimeout(() => setNotify(''), 5000);
-  };
-
-  // Función MEJORADA para cancelar navegación
-  const stopNavigation = () => {
-    setIsNav(false);
-    setDest(null);
-    clearExistingRoutes(); // Esto ahora limpia TODAS las rutas correctamente
-    
-    // También limpiar directions
-    if (directions.current) {
-      try {
-        directions.current.removeRoutes();
-      } catch (e) {
-        console.log('Error removing routes from directions:', e);
-      }
-    }
-    
-    setNotify('❌ Navegación cancelada. Ruta eliminada.');
-    setTimeout(() => setNotify(''), 3000);
-  };
-
   return (
     <div className="map-root">
+      {/* Indicador de estado de conexión */}
+      <div className={`connection-status ${wsConnected ? 'connected' : 'disconnected'}`}>
+        {wsConnected ? '✅ Conectado' : '❌ Desconectado'} | {connectionStatus}
+        {!wsConnected && (
+          <button 
+            onClick={reconnectWebSocket}
+            style={{
+              marginLeft: '10px',
+              padding: '4px 8px',
+              background: '#ff9800',
+              border: 'none',
+              borderRadius: '4px',
+              color: 'white',
+              fontSize: '10px',
+              cursor: 'pointer'
+            }}
+          >
+            🔄 Reconectar
+          </button>
+        )}
+      </div>
+
       <div className="top-bar">
         <div>
           <div style={{ fontWeight: 800 }}>🚑 Ambulancia UVI-01</div>
           <div style={{ fontSize: 13, opacity: 0.7 }}>
             Estado: {isNav ? `En ruta a ${dest?.name || 'hospital'}` : 'Disponible'}
+            {hospitalsList.length > 0 && (
+              <span> • {hospitalsList.filter(h => h.connected).length} hospitales conectados</span>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -589,9 +931,35 @@ export default function MapaOperador() {
         </div>
       )}
 
+      {/* Notificación del hospital */}
+      {hospitalNotification && (
+        <div className="notification-alert show" style={{ 
+          background: hospitalNotification.type === 'accepted' ? '#1a3a26' : '#3a1a1a'
+        }}>
+          {hospitalNotification.message}
+        </div>
+      )}
+
       <div className="controls">
-        <button className="btn btn-danger" onClick={() => { setShowForm(true); calcHospitals(); }}>
+        <button 
+          className="btn btn-danger" 
+          onClick={() => { setShowForm(true); calcHospitals(); }}
+          disabled={!wsConnected}
+        >
           ⚠️ EMERGENCIA
+        </button>
+        <button
+          className="btn btn-warning"
+          onClick={refreshHospitalsList}
+          disabled={!wsConnected}
+        >
+          🔄 Actualizar Hospitales
+        </button>
+        <button
+          className="btn btn-success"
+          onClick={reconnectWebSocket}
+        >
+          🔌 {wsConnected ? 'Conexión OK' : 'Reconectar'}
         </button>
         <button
           className="btn btn-primary"
@@ -638,16 +1006,28 @@ export default function MapaOperador() {
                 value={type} 
                 onChange={(e) => setType(e.target.value)} 
               />
-              <button className="btn btn-primary" onClick={calcHospitals}>
+              <button 
+                className="btn btn-primary" 
+                onClick={calcHospitals}
+                disabled={!wsConnected}
+              >
                 📍 Buscar hospitales
               </button>
             </div>
             <div style={{ marginTop: 10, maxHeight: 200, overflowY: 'auto' }}>
-              {hospitalsList.map((h) => (
+              {hospitalsList.filter(h => h.connected).map((h) => (
                 <div key={h.id} className="hospital-item">
                   <div>
                     <b>{h.name}</b>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>{h.dist.toFixed(2)} km</div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>
+                      {h.dist ? `${h.dist.toFixed(2)} km` : 'Calculando...'} 
+                      {h.camasDisponibles > 0 && ` • ${h.camasDisponibles} camas`}
+                    </div>
+                    {h.especialidades && h.especialidades.length > 0 && (
+                      <div style={{ fontSize: 11, opacity: 0.6 }}>
+                        {h.especialidades.slice(0, 2).join(', ')}
+                      </div>
+                    )}
                   </div>
                   <button
                     className="btn"
@@ -659,7 +1039,6 @@ export default function MapaOperador() {
                     }}
                     onClick={() => {
                       setSelected(h.id);
-                      // Trazar ruta inmediatamente al seleccionar hospital
                       if (pos) {
                         const hospital = hospitalsList.find(hos => hos.id === h.id);
                         if (hospital) {
@@ -675,13 +1054,22 @@ export default function MapaOperador() {
                   </button>
                 </div>
               ))}
+              {hospitalsList.filter(h => h.connected).length === 0 && (
+                <div style={{ textAlign: 'center', padding: '20px', color: '#666' }}>
+                  {wsConnected ? 'No hay hospitales conectados disponibles' : 'Sin conexión al servidor'}
+                </div>
+              )}
             </div>
             <div style={{ marginTop: 10, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
               <button className="btn" onClick={() => {
                 setShowForm(false);
-                clearExistingRoutes(); // Limpiar rutas de vista previa al cancelar
+                clearExistingRoutes();
               }}>Cancelar</button>
-              <button className="btn btn-danger" onClick={confirm}>
+              <button 
+                className="btn btn-danger" 
+                onClick={confirm}
+                disabled={!wsConnected || !selected}
+              >
                 Confirmar y Trazar Ruta
               </button>
             </div>

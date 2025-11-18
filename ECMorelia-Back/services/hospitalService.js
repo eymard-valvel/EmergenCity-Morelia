@@ -45,6 +45,31 @@ class HospitalService {
     }
   }
 
+  async getHospitalById(id) {
+  try {
+    const hospital = await prisma.hospitales.findUnique({
+      where: {
+        id_hospitales: Number(id)
+      },
+      select: {
+        id_hospitales: true,
+        nombre: true,
+        direccion: true
+      }
+    });
+
+    if (!hospital) {
+      throw new Error("Hospital no encontrado");
+    }
+
+    return hospital;
+
+  } catch (error) {
+    throw new Error(error.message);
+  }
+}
+
+
   async updateById({ id, data }) {
     try {
       const recordExists = await prisma.hospitales.findFirst({

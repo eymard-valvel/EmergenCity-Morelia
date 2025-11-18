@@ -25,7 +25,7 @@ export default function Header() {
 
 	// Lista de elementos del menú lateral para simplificar el renderizado
 	const sidebarItems = [
-		{ label: "Mapa", icon: "pi pi-map-marker", path: "/mapa" },
+		{ label: "Mapa", icon: "pi pi-map-marker", path: "/navmapa" },
 		{ label: "Gestión de Ambulancias", icon: "pi pi-ambulance", path: "/ambulancias" },
 		{ label: "Gestión Paramédicos", icon: "pi pi-users", path: "/paramedicos" },
 		{ label: "Gestión de Hospitales", icon: "pi pi-building", path: "/hospitales" }, // Icono actualizado
