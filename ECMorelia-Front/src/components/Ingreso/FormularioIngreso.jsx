@@ -92,15 +92,29 @@ onSubmit: async (values) => {
     const response = await request.json();
     
     // GUARDAR INFORMACIÓN DEL HOSPITAL EN LOCALSTORAGE
-    if (values.role === "hospitales") {
-      localStorage.setItem('hospitalInfo', JSON.stringify({
-        nombre: values.nombre,
-        // Aquí podrías agregar más datos del hospital que devuelva tu API
-        id: response.hospitalId || null,
-        // Agregar ubicación por defecto o desde la respuesta
-        ubicacion: response.ubicacion || { lat: 19.702428, lng: -101.1969319 }
-      }));
-    }
+
+	// === GUARDAR INFORMACIÓN DEL HOSPITAL EN LOCALSTORAGE ===
+if (values.role === "hospitales") {
+
+  const hospital = response;
+
+  if (!hospital.id_hospitales) {
+    throw new Error("El backend no devolvió un id_hospitales válido.");
+  }
+
+  localStorage.setItem(
+    "hospitalInfo",
+    JSON.stringify({
+      id: hospital.id_hospitales,
+      nombre: hospital.nombre,
+      direccion: hospital.direccion,
+      ubicacion: {
+        lat: hospital.latitud || 19.702428,
+        lng: hospital.longitud || -101.1969319
+      }
+    })
+  );
+}
     
     newCookie({ name: "role", value: response.role });
     setAuth(response.role);

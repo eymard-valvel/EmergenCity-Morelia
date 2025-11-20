@@ -65,32 +65,40 @@ async verifyUser(user, rol, id) {
         throw new Error(error.message)
     }
 }
-  
-/*
-  async verifyUser(user, rol, id) {
-    try {
-      const currentUser = await prisma[rol].findUnique({
-        where: { [id]: user[id] }
-      })
 
-      if (!currentUser) {
-        throw new Error('User not found')
+  async verifyHospital(data) {
+    try {
+      const hospital = await prisma.hospitales.findFirst({
+        where: {
+          nombre: data.nombre
+        }
+      });
+
+      if (!hospital) {
+        throw new Error("Hospital no encontrado");
       }
 
       const isPasswordValid = await this.bcryptService.comparePassword(
-        user.password,
-        currentUser.password
-      )
+        data.password,
+        hospital.password
+      );
+
       if (!isPasswordValid) {
-        throw new Error('Invalid credentials')
+        throw new Error("Contraseña incorrecta");
       }
 
-      return this.jwtService.generateToken({ sub: currentUser.licencia_medica })
+      return {
+        id_hospitales: hospital.id_hospitales,
+        nombre: hospital.nombre,
+        direccion: hospital.direccion,
+        latitud: hospital.latitud || null,
+        longitud: hospital.longitud || null
+      };
     } catch (error) {
-      throw new Error(error.message)
+      throw new Error(error.message);
     }
   }
-  */
+
 }
 
 module.exports = OperadorService

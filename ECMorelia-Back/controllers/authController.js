@@ -14,7 +14,7 @@ class AuthController {
         operador: async () => await this.userService.addUser(user, role, 'licencia_medica'),
         paramedicos: async () => await this.userService.addUser(user, role, 'licencia_medica'),
         doctor: async () => await this.userService.addUser(user, role, 'licencia_medica'),
-        hospitales: async () => await this.userService.addUser(user, role, 'nombre')
+hospitales: async () => await this.userService.addUser(user, role, 'nombre')
       }
 
       if (!signupByRole[role]) {
@@ -41,27 +41,39 @@ class AuthController {
         operador: async () => await this.userService.verifyUser(user, role, 'licencia_medica'),
         paramedicos: async () => await this.userService.verifyUser(user, role, 'licencia_medica'),
         doctor: async () => await this.userService.verifyUser(user, role, 'licencia_medica'),
-        hospitales: async () => await this.userService.verifyUser(user, role, 'nombre')
+hospitales: async () => await this.userService.verifyHospital(user)
       }
 
       if (!loginByRole[role]) {
         return res.status(404).send({ message: 'Role not supported' })
       }
 
-      const token = await loginByRole[role]()
+      const result = await loginByRole[role]()
 
-      if (!token) {
-        return res.status(404).send({ message: 'User not found' })
-      }
-      return res
-        .cookie('token', token, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          maxAge: 3600000,
-          sameSite: 'Strict'
-        })
-        .status(200)
-        .send({ message: 'Login successful', role })
+// Login normal (operador, doctor, paramédico)
+if (role !== 'hospitales') {
+  return res
+    .cookie('token', result, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 3600000,
+      sameSite: 'Strict'
+    })
+    .status(200)
+    .send({ message: 'Login successful', role })
+}
+
+// Login para hospitales
+return res.status(200).send({
+  message: 'Login successful',
+  role,
+  id_hospitales: result.id_hospitales,
+  nombre: result.nombre,
+  direccion: result.direccion,
+  latitud: result.latitud,
+  longitud: result.longitud
+})
+
     } catch (error) {
       res.status(400).json({ message: error.message })
     }

@@ -45,6 +45,22 @@ class HospitalService {
     }
   }
 
+  async getHospitalByName(nombre) {
+  try {
+    return await prisma.hospitales.findFirst({
+      where: { nombre },
+      select: {
+        id_hospitales: true,
+        nombre: true,
+        direccion: true
+      }
+    });
+  } catch (error) {
+    throw new Error(error.message);
+  }
+}
+
+
   async getHospitalById(id) {
   try {
     const hospital = await prisma.hospitales.findUnique({
@@ -68,6 +84,30 @@ class HospitalService {
     throw new Error(error.message);
   }
 }
+
+  async loginHospital(nombre, password) {
+    try {
+      const hospital = await prisma.hospitales.findFirst({
+        where: {
+          nombre,
+          password
+        },
+        select: {
+          id_hospitales: true,
+          nombre: true,
+          direccion: true,
+          latitud: true,
+          longitud: true
+        }
+      });
+
+      return hospital ?? null;
+
+    } catch (error) {
+      throw new Error(error.message);
+    }
+  }
+
 
 
   async updateById({ id, data }) {
