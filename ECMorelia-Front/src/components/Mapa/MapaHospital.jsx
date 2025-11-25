@@ -1,10 +1,9 @@
-// src/components/Mapa/MapaHospital.jsx
-import React, { useEffect, useState, useRef } from "react";
+// MapaHospitalOptimizado.jsx
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import {
   ChakraProvider,
-  theme,
   Box,
   Button,
   VStack,
@@ -23,49 +22,845 @@ import {
   AlertIcon,
   AlertTitle,
   AlertDescription,
-  Grid,
-  GridItem,
   useToast,
+  Card,
+  CardBody,
+  Progress,
+  Input,
+  Select,
+  Spinner
 } from "@chakra-ui/react";
 
-// Configuración de Mapbox
-mapboxgl.accessToken =
-  "pk.eyJ1IjoiZWR1YXJkbzI1MGplbW0iLCJhIjoiY2xwYzVvdzc3MDNlYjJoazUzbzZsYjRwNiJ9.KsDXLdjWn2R4fMX-YIIU8g";
+mapboxgl.accessToken = 'pk.eyJ1IjoiZWR1YXJkbzI1MGplbW0iLCJhIjoiY2xwYzVvdzc3MDNlYjJoazUzbzZsYjRwNiJ9.KsDXLdjWn2R4fMX-YIIU8g';
 
-// -----------------------------
-// MapaHospital - componente
-// -----------------------------
-function MapaHospital() {
-  // Estado general
-  const [map, setMap] = useState(null);
-  const [activeAmbulances, setActiveAmbulances] = useState([]);
-  const [selectedAmbulance, setSelectedAmbulance] = useState(null);
-  const [patientNotifications, setPatientNotifications] = useState([]);
-  const [wsConnected, setWsConnected] = useState(false);
-  const [activeRoute, setActiveRoute] = useState(null);
-
-  // Modals & formularios
-  const { isOpen: isNoteOpen, onOpen: onNoteOpen, onClose: onNoteClose } = useDisclosure();
-  const { isOpen: isNotificationOpen, onOpen: onNotificationOpen, onClose: onNotificationClose } = useDisclosure();
-  const [noteMessage, setNoteMessage] = useState("");
-  const [patientInfo, setPatientInfo] = useState("");
-  const [selectedNotification, setSelectedNotification] = useState(null);
-  const toast = useToast();
-
-  // Información del hospital (vendrá desde localStorage y backend)
-  const [hospitalInfo, setHospitalInfo] = useState(null);
-
+export default function MapaHospitalOptimizado() {
   // Refs
   const mapContainer = useRef(null);
+  const map = useRef(null);
   const ws = useRef(null);
-  const ambulanceMarkers = useRef({});
   const hospitalMarker = useRef(null);
+  const ambulanceMarkers = useRef({});
   const routeLayerIds = useRef([]);
   const reconnectTimeout = useRef(null);
+  const connectionAttempts = useRef(0);
+  const maxConnectionAttempts = 5;
+  const isMounted = useRef(true);
 
-  // -----------------------------
-  // Helpers
-  // -----------------------------
+  // Estado principal
+  const [hospitalInfo, setHospitalInfo] = useState(null);
+  const [ambulances, setAmbulances] = useState([]);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [activeRoute, setActiveRoute] = useState(null);
+  const [trafficEnabled, setTrafficEnabled] = useState(true);
+  const [isConnecting, setIsConnecting] = useState(false);
+
+  // Notificaciones y modales
+  const [patientNotifications, setPatientNotifications] = useState([]);
+  const [selectedNotification, setSelectedNotification] = useState(null);
+  const [selectedAmbulance, setSelectedAmbulance] = useState(null);
+  
+  const { isOpen: isNoteOpen, onOpen: onNoteOpen, onClose: onNoteClose } = useDisclosure();
+  const { isOpen: isNotificationOpen, onOpen: onNotificationOpen, onClose: onNotificationClose } = useDisclosure();
+  
+  const [noteMessage, setNoteMessage] = useState("");
+  const [patientInfo, setPatientInfo] = useState("");
+
+  const toast = useToast();
+
+  // ---------- WEBSOCKET CONNECTION MEJORADA ----------
+  const connectWebSocket = useCallback(() => {
+    if (!isMounted.current || isConnecting || connectionAttempts.current >= maxConnectionAttempts) {
+      return;
+    }
+
+    try {
+      if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
+      console.log('🏥 Conectando hospital al WebSocket...');
+      setIsConnecting(true);
+      connectionAttempts.current += 1;
+
+      ws.current = new WebSocket('ws://localhost:3002/ws');
+
+      ws.current.onopen = () => {
+        if (!isMounted.current) return;
+        
+        console.log('✅ Hospital conectado al servidor WebSocket');
+        setWsConnected(true);
+        setIsConnecting(false);
+        connectionAttempts.current = 0;
+        
+        // Registrar hospital cuando la info esté disponible
+        if (hospitalInfo) {
+          registerHospital();
+        }
+        
+        showToast('success', 'Sistema Conectado', 'Hospital conectado al servidor central');
+      };
+
+      ws.current.onmessage = (event) => {
+        if (!isMounted.current) return;
+        
+        try {
+          const data = JSON.parse(event.data);
+          console.log('📨 Mensaje recibido en hospital:', data.type);
+
+          switch (data.type) {
+            case 'connection_established':
+              console.log('✅ Conexión WebSocket confirmada');
+              break;
+
+            case 'active_ambulances_update':
+              console.log('🚑 Ambulancias actualizadas:', data.ambulances.length);
+              setAmbulances(data.ambulances || []);
+              updateAmbulanceMarkers(data.ambulances || []);
+              break;
+
+            case 'location_update':
+              handleAmbulanceLocationUpdate(data);
+              break;
+
+            case 'patient_transfer_notification':
+              handlePatientTransferNotification(data);
+              break;
+
+            case 'route_update':
+              if (data.routeGeometry) {
+                drawRouteOnMap(data.routeGeometry);
+                setActiveRoute({
+                  ambulanceId: data.ambulanceId,
+                  geometry: data.routeGeometry,
+                  distance: data.distance,
+                  duration: data.duration
+                });
+              }
+              break;
+
+            case 'navigation_cancelled':
+              handleNavigationCancelled(data);
+              break;
+
+            case 'patient_accepted':
+              if (data.hospitalId === hospitalInfo?.id) {
+                setPatientNotifications(prev => 
+                  prev.filter(n => n.notificationId !== data.notificationId)
+                );
+                showToast('success', 'Paciente Aceptado', 'Traslado confirmado - Preparar recepción');
+              }
+              break;
+
+            case 'patient_rejected':
+              if (data.hospitalId === hospitalInfo?.id) {
+                setPatientNotifications(prev => 
+                  prev.filter(n => n.notificationId !== data.notificationId)
+                );
+                clearRoute();
+                showToast('warning', 'Paciente Rechazado', 'Se ha notificado a la ambulancia');
+              }
+              break;
+
+            case 'error':
+              showToast('error', 'Error del Sistema', data.message);
+              break;
+
+            default:
+              console.log('📨 Mensaje no manejado:', data.type);
+          }
+        } catch (error) {
+          console.error('❌ Error procesando mensaje:', error);
+        }
+      };
+
+      ws.current.onclose = (event) => {
+        if (!isMounted.current) return;
+        
+        console.log('🔌 WebSocket cerrado:', event.code, event.reason);
+        setWsConnected(false);
+        setIsConnecting(false);
+
+        if (event.code !== 1000 && connectionAttempts.current < maxConnectionAttempts) {
+          showToast('warning', 'Conexión Perdida', 'Reconectando automáticamente...');
+          reconnectTimeout.current = setTimeout(() => {
+            connectWebSocket();
+          }, 5000); // Aumentado a 5 segundos
+        } else if (connectionAttempts.current >= maxConnectionAttempts) {
+          showToast('error', 'Error de Conexión', 'No se pudo conectar después de varios intentos');
+        }
+      };
+
+      ws.current.onerror = (error) => {
+        if (!isMounted.current) return;
+        
+        console.error('❌ Error WebSocket:', error);
+        setWsConnected(false);
+        setIsConnecting(false);
+        showToast('error', 'Error de Conexión', 'Verifique la conexión al servidor');
+      };
+
+    } catch (error) {
+      console.error('❌ Error al conectar WebSocket:', error);
+      setIsConnecting(false);
+    }
+  }, [hospitalInfo, isConnecting]);
+
+  // ---------- HOSPITAL REGISTRATION CON GEOCODING MEJORADO ----------
+  const registerHospital = useCallback(() => {
+    if (!hospitalInfo || !ws.current || ws.current.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    // Solo registrar si tenemos coordenadas válidas
+    if (hospitalInfo.lat && hospitalInfo.lng) {
+      ws.current.send(JSON.stringify({
+        type: 'register_hospital',
+        hospital: hospitalInfo
+      }));
+
+      console.log('🏥 Hospital registrado con coordenadas:', hospitalInfo.nombre);
+    } else {
+      console.error('❌ No se puede registrar hospital sin coordenadas válidas');
+    }
+  }, [hospitalInfo]);
+
+  // ---------- HOSPITAL DATA LOADING MEJORADO ----------
+  useEffect(() => {
+    isMounted.current = true;
+
+    const loadHospitalData = async () => {
+      try {
+        const stored = JSON.parse(localStorage.getItem("hospitalInfo") || "null");
+        
+        if (!stored || !stored.id) {
+          showToast('error', 'Configuración Requerida', 'Complete la información del hospital en el sistema');
+          return;
+        }
+
+        let hospitalData = {
+          id: stored.id,
+          nombre: stored.nombre || "Hospital",
+          direccion: stored.direccion || "",
+          lat: stored.lat,
+          lng: stored.lng,
+          especialidades: stored.especialidades || ['General'],
+          camasDisponibles: stored.camasDisponibles || 10,
+          telefono: stored.telefono || ''
+        };
+
+        // Solo forzar geocoding si no tenemos coordenadas válidas
+        if (hospitalData.direccion && (!hospitalData.lat || !hospitalData.lng)) {
+          showToast('info', 'Verificando Ubicación', 'Validando coordenadas del hospital...');
+          
+          const verifiedCoords = await geocodeHospitalAddress(hospitalData.direccion);
+          hospitalData.lat = verifiedCoords.lat;
+          hospitalData.lng = verifiedCoords.lng;
+
+          // Actualizar localStorage con coordenadas corregidas
+          localStorage.setItem("hospitalInfo", JSON.stringify({
+            ...stored,
+            lat: verifiedCoords.lat,
+            lng: verifiedCoords.lng
+          }));
+        }
+
+        if (isMounted.current) {
+          setHospitalInfo(hospitalData);
+          showToast('success', 'Hospital Configurado', `${hospitalData.nombre} listo para recibir pacientes`);
+        }
+
+      } catch (error) {
+        console.error('❌ Error cargando datos del hospital:', error);
+        showToast('error', 'Error de Configuración', 'No se pudieron cargar los datos del hospital');
+      }
+    };
+
+    loadHospitalData();
+
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
+
+  // ---------- GEOCODING MEJORADO ----------
+  const geocodeHospitalAddress = async (address) => {
+    if (!address) {
+      return { lat: 19.7024, lng: -101.1969 };
+    }
+
+    try {
+      const response = await fetch('http://localhost:3002/geocode', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ address: address + ', Morelia, Michoacán' })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result && result.lat && result.lng) {
+          console.log('✅ Hospital geocoded correctamente:', result.place_name);
+          return { lat: result.lat, lng: result.lng };
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error en geocoding hospital:', error);
+    }
+
+    return { lat: 19.7024, lng: -101.1969 };
+  };
+
+  // ---------- MAP INITIALIZATION ----------
+  useEffect(() => {
+    if (!hospitalInfo || !mapContainer.current) return;
+
+    const mapInstance = new mapboxgl.Map({
+      container: mapContainer.current,
+      style: 'mapbox://styles/mapbox/light-v11',
+      center: [hospitalInfo.lng, hospitalInfo.lat],
+      zoom: 15,
+      pitch: 45
+    });
+
+    mapInstance.addControl(new mapboxgl.NavigationControl(), 'top-right');
+
+    mapInstance.on('load', () => {
+      console.log('🗺️ Mapa del hospital cargado');
+      map.current = mapInstance;
+      
+      // Colocar marcador del hospital
+      placeHospitalMarker();
+      
+      // Agregar capas
+      if (trafficEnabled) {
+        addTrafficLayer();
+      }
+      add3DBuildings();
+    });
+
+    map.current = mapInstance;
+
+    return () => {
+      cleanupMarkers();
+      try { 
+        if (mapInstance) mapInstance.remove(); 
+      } catch (e) {}
+    };
+  }, [hospitalInfo]);
+
+  // ---------- WEBSOCKET LIFECYCLE ----------
+  useEffect(() => {
+    if (hospitalInfo) {
+      // Esperar un poco antes de conectar para evitar bucles
+      const timeoutId = setTimeout(() => {
+        connectWebSocket();
+      }, 1000);
+
+      return () => clearTimeout(timeoutId);
+    }
+  }, [hospitalInfo, connectWebSocket]);
+
+  // Cleanup effect
+  useEffect(() => {
+    return () => {
+      isMounted.current = false;
+      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
+      if (ws.current) {
+        try {
+          ws.current.close(1000, 'Componente desmontado');
+        } catch (e) {}
+      }
+    };
+  }, []);
+
+  // ---------- MAP LAYERS ----------
+  const addTrafficLayer = () => {
+    if (!map.current) return;
+
+    try {
+      if (!map.current.getSource('mapbox-traffic')) {
+        map.current.addSource('mapbox-traffic', {
+          type: 'vector',
+          url: 'mapbox://mapbox.mapbox-traffic-v1'
+        });
+      }
+
+      if (!map.current.getLayer('traffic-layer-hospital')) {
+        map.current.addLayer({
+          id: 'traffic-layer-hospital',
+          type: 'line',
+          source: 'mapbox-traffic',
+          'source-layer': 'traffic',
+          paint: {
+            'line-color': [
+              'case',
+              ['==', ['get', 'congestion'], 'low'], '#00C853',
+              ['==', ['get', 'congestion'], 'moderate'], '#FF9100',
+              ['==', ['get', 'congestion'], 'heavy'], '#FF3D00',
+              '#00C853'
+            ],
+            'line-width': 4,
+            'line-opacity': 0.7
+          }
+        }, 'waterway-label');
+      }
+    } catch (error) {
+      console.warn('No se pudo agregar capa de tráfico:', error);
+    }
+  };
+
+  const add3DBuildings = () => {
+    if (!map.current) return;
+
+    try {
+      const layers = map.current.getStyle().layers;
+      const labelLayerId = layers.find(layer => layer.type === 'symbol' && layer.layout['text-field'])?.id;
+
+      if (map.current.getSource('composite')) {
+        map.current.addLayer({
+          id: '3d-buildings-hospital',
+          source: 'composite',
+          'source-layer': 'building',
+          filter: ['==', 'extrude', 'true'],
+          type: 'fill-extrusion',
+          minzoom: 15,
+          paint: {
+            'fill-extrusion-color': '#BDBDBD',
+            'fill-extrusion-height': ['get', 'height'],
+            'fill-extrusion-base': ['get', 'min_height'],
+            'fill-extrusion-opacity': 0.6
+          }
+        }, labelLayerId);
+      }
+    } catch (error) {
+      console.warn('No se pudo agregar edificios 3D:', error);
+    }
+  };
+
+  const toggleTraffic = () => {
+    if (!map.current) return;
+
+    if (trafficEnabled) {
+      if (map.current.getLayer('traffic-layer-hospital')) {
+        map.current.removeLayer('traffic-layer-hospital');
+      }
+      setTrafficEnabled(false);
+      showToast('info', 'Tráfico', 'Capa de tráfico desactivada');
+    } else {
+      addTrafficLayer();
+      setTrafficEnabled(true);
+      showToast('info', 'Tráfico', 'Capa de tráfico activada');
+    }
+  };
+
+  // ---------- MARKER MANAGEMENT ----------
+  const placeHospitalMarker = () => {
+    if (!map.current || !hospitalInfo) return;
+
+    try {
+      if (hospitalMarker.current) {
+        hospitalMarker.current.remove();
+      }
+
+      const el = document.createElement('div');
+      el.innerHTML = `
+        <div style="
+          width: 70px; height: 70px; background: linear-gradient(135deg, #2E7D32, #1B5E20);
+          border: 4px solid white; border-radius: 50%; display: flex; align-items: center; 
+          justify-content: center; color: white; font-weight: bold; font-size: 28px; 
+          box-shadow: 0 8px 25px rgba(46,125,50,0.3); cursor: pointer;
+        ">🏥</div>
+      `;
+
+      const popup = new mapboxgl.Popup({ offset: 25 })
+        .setHTML(`
+          <div style="padding: 16px; max-width: 320px; font-family: Arial, sans-serif;">
+            <strong style="font-size: 18px; color: #2E7D32;">${hospitalInfo.nombre}</strong>
+            <div style="margin: 12px 0; font-size: 14px; color: #555;">
+              <div><strong>📍 Dirección:</strong> ${hospitalInfo.direccion}</div>
+              <div><strong>📞 Teléfono:</strong> ${hospitalInfo.telefono || 'No disponible'}</div>
+              <div><strong>🛏️ Camas disponibles:</strong> ${hospitalInfo.camasDisponibles}</div>
+              <div><strong>🏥 Especialidades:</strong> ${hospitalInfo.especialidades.join(', ')}</div>
+            </div>
+            <em style="color: #888; font-size: 12px;">Centro médico operativo - Sistema de emergencias</em>
+          </div>
+        `);
+
+      hospitalMarker.current = new mapboxgl.Marker({ element: el })
+        .setLngLat([hospitalInfo.lng, hospitalInfo.lat])
+        .setPopup(popup)
+        .addTo(map.current);
+
+    } catch (error) {
+      console.error('❌ Error colocando marcador del hospital:', error);
+    }
+  };
+
+  const updateAmbulanceMarkers = (ambulancesList) => {
+    if (!map.current) return;
+
+    // Limpiar marcadores antiguos
+    Object.values(ambulanceMarkers.current).forEach(marker => {
+      try { marker.remove(); } catch (e) {}
+    });
+    ambulanceMarkers.current = {};
+
+    ambulancesList.forEach(ambulance => {
+      if (!ambulance.location || !ambulance.location.lat || !ambulance.location.lng) return;
+
+      const el = document.createElement('div');
+      el.innerHTML = `
+        <div style="
+          width: 55px; height: 55px; background: linear-gradient(135deg, #D32F2F, #B71C1C);
+          border: 3px solid white; border-radius: 50%; display: flex; align-items: center; 
+          justify-content: center; color: white; font-weight: bold; font-size: 22px; 
+          box-shadow: 0 4px 15px rgba(211,47,47,0.3); cursor: pointer;
+        ">🚑</div>
+      `;
+
+      const popup = new mapboxgl.Popup({ offset: 25 })
+        .setHTML(`
+          <div style="padding: 12px; max-width: 260px; font-family: Arial, sans-serif;">
+            <strong style="font-size: 16px; color: #D32F2F;">🚑 ${ambulance.id}</strong>
+            <div style="margin: 8px 0; font-size: 14px; color: #555;">
+              <div>📋 Placa: ${ambulance.placa || 'N/A'}</div>
+              <div>🔧 Tipo: ${ambulance.tipo || 'N/A'}</div>
+              <div>📊 Estado: ${ambulance.status === 'en_ruta' ? 'EN RUTA' : 'DISPONIBLE'}</div>
+              <div>💨 Velocidad: ${ambulance.speed || 0} km/h</div>
+            </div>
+            <button onclick="window.selectAmbulanceFromMap('${ambulance.id}')"
+              style="width: 100%; padding: 8px 12px; background: #2196F3; color: white;
+              border: none; border-radius: 6px; cursor: pointer; margin-top: 8px; font-size: 12px;
+              box-shadow: 0 2px 6px rgba(33,150,243,0.3);">
+              👁️ Seguir Ambulancia
+            </button>
+          </div>
+        `);
+
+      const marker = new mapboxgl.Marker({ element: el })
+        .setLngLat([ambulance.location.lng, ambulance.location.lat])
+        .setPopup(popup)
+        .addTo(map.current);
+
+      ambulanceMarkers.current[ambulance.id] = marker;
+
+      el.addEventListener('click', () => {
+        setSelectedAmbulance(ambulance);
+        showToast('info', 'Ambulancia Seleccionada', ambulance.id);
+      });
+    });
+
+    // Función global para selección desde popup
+    window.selectAmbulanceFromMap = (ambulanceId) => {
+      const ambulance = ambulancesList.find(a => a.id === ambulanceId);
+      if (ambulance) {
+        setSelectedAmbulance(ambulance);
+        showToast('info', 'Ambulancia Seleccionada', ambulance.id);
+        
+        // Centrar en la ambulancia
+        if (ambulance.location) {
+          map.current.flyTo({
+            center: [ambulance.location.lng, ambulance.location.lat],
+            zoom: 15,
+            duration: 1000
+          });
+        }
+      }
+    };
+  };
+
+  const handleAmbulanceLocationUpdate = (data) => {
+    if (!data.ambulanceId || !data.location) return;
+
+    const marker = ambulanceMarkers.current[data.ambulanceId];
+    if (marker) {
+      // Actualizar posición del marcador
+      marker.setLngLat([data.location.lng, data.location.lat]);
+      
+      // Actualizar estado local
+      setAmbulances(prev => prev.map(amb => 
+        amb.id === data.ambulanceId 
+          ? { ...amb, location: data.location, speed: data.speed, heading: data.heading }
+          : amb
+      ));
+    }
+  };
+
+  const cleanupMarkers = () => {
+    if (hospitalMarker.current) {
+      hospitalMarker.current.remove();
+      hospitalMarker.current = null;
+    }
+    
+    Object.values(ambulanceMarkers.current).forEach(marker => {
+      try { marker.remove(); } catch (e) {}
+    });
+    ambulanceMarkers.current = {};
+  };
+
+  // ---------- ROUTE MANAGEMENT ----------
+  const drawRouteOnMap = (routeGeometry, routeId = 'hospital-route') => {
+    if (!map.current || !routeGeometry) return;
+
+    // Limpiar ruta anterior
+    clearRoute();
+
+    try {
+      map.current.addSource(routeId, {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: routeGeometry
+          },
+          properties: {}
+        }
+      });
+
+      // Capa principal de ruta
+      map.current.addLayer({
+        id: routeId,
+        type: 'line',
+        source: routeId,
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round'
+        },
+        paint: {
+          'line-color': '#2196F3',
+          'line-width': 6,
+          'line-opacity': 0.9
+        }
+      });
+
+      // Efecto glow
+      map.current.addLayer({
+        id: routeId + '-glow',
+        type: 'line',
+        source: routeId,
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round'
+        },
+        paint: {
+          'line-color': '#2196F3',
+          'line-width': 12,
+          'line-opacity': 0.3,
+          'line-blur': 1.5
+        }
+      }, routeId);
+
+      routeLayerIds.current = [routeId, routeId + '-glow'];
+
+      // Ajustar vista para mostrar la ruta completa
+      const bounds = new mapboxgl.LngLatBounds();
+      routeGeometry.forEach(coord => {
+        bounds.extend([coord[0], coord[1]]);
+      });
+      if (hospitalInfo) {
+        bounds.extend([hospitalInfo.lng, hospitalInfo.lat]);
+      }
+
+      map.current.fitBounds(bounds, {
+        padding: 80,
+        duration: 1500,
+        pitch: 45
+      });
+
+    } catch (error) {
+      console.error('❌ Error dibujando ruta:', error);
+    }
+  };
+
+  const clearRoute = () => {
+    if (!map.current) return;
+
+    routeLayerIds.current.forEach(layerId => {
+      if (map.current.getLayer(layerId)) {
+        map.current.removeLayer(layerId);
+      }
+      if (map.current.getSource(layerId)) {
+        map.current.removeSource(layerId);
+      }
+    });
+    routeLayerIds.current = [];
+    setActiveRoute(null);
+  };
+
+  const calculateRouteToAmbulance = async (ambulance) => {
+    if (!ambulance || !ambulance.location || !hospitalInfo) {
+      showToast('warning', 'Datos Incompletos', 'No se puede calcular la ruta');
+      return;
+    }
+
+    try {
+      const response = await fetch('http://localhost:3002/directions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          startLng: ambulance.location.lng,
+          startLat: ambulance.location.lat,
+          endLng: hospitalInfo.lng,
+          endLat: hospitalInfo.lat
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Error calculando ruta');
+      }
+
+      const routeData = await response.json();
+      
+      drawRouteOnMap(routeData.geometry);
+      setActiveRoute({
+        ambulanceId: ambulance.id,
+        geometry: routeData.geometry,
+        distance: routeData.distance,
+        duration: routeData.duration
+      });
+
+      showToast('success', 'Ruta Calculada', 
+        `${(routeData.distance / 1000).toFixed(1)} km, ${Math.round(routeData.duration / 60)} min`);
+
+    } catch (error) {
+      console.error('❌ Error calculando ruta:', error);
+      showToast('error', 'Error de Ruta', 'No se pudo calcular la ruta');
+    }
+  };
+
+  // ---------- NOTIFICATION HANDLING MEJORADO ----------
+  const handlePatientTransferNotification = (data) => {
+    console.log('🚨 Notificación de traslado recibida:', data);
+    
+    const notification = {
+      ...data,
+      id: data.notificationId || `notif_${Date.now()}`,
+      timestamp: new Date().toLocaleString(),
+      status: 'pending'
+    };
+
+    setPatientNotifications(prev => [...prev, notification]);
+    setSelectedNotification(notification);
+
+    // Mostrar ruta si está disponible
+    if (data.routeGeometry) {
+      drawRouteOnMap(data.routeGeometry);
+      setActiveRoute({
+        ambulanceId: data.ambulanceId,
+        geometry: data.routeGeometry,
+        distance: data.distance,
+        duration: data.duration
+      });
+    }
+
+    showToast('info', 'Nuevo Paciente en Camino', 
+      `Ambulancia ${data.ambulanceId} - ETA: ${data.eta || '?'} min`);
+    
+    onNotificationOpen();
+  };
+
+  const handleNavigationCancelled = (data) => {
+    clearRoute();
+    setPatientNotifications(prev => 
+      prev.filter(n => n.ambulanceId !== data.ambulanceId)
+    );
+    showToast('info', 'Navegación Cancelada', 'Ambulancia canceló el traslado');
+  };
+
+  const acceptPatient = (notification) => {
+    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+      showToast('error', 'Error de Conexión', 'No hay conexión con el servidor');
+      return;
+    }
+
+    // Enviar aceptación
+    ws.current.send(JSON.stringify({
+      type: 'hospital_accept_patient',
+      notificationId: notification.notificationId,
+      hospitalId: hospitalInfo.id,
+      hospitalInfo: hospitalInfo
+    }));
+
+    setPatientNotifications(prev => 
+      prev.filter(n => n.notificationId !== notification.notificationId)
+    );
+    
+    showToast('success', 'Paciente Aceptado', 'Preparar área de recepción');
+    onNotificationClose();
+  };
+
+  const rejectPatient = (notification) => {
+    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+      showToast('error', 'Error de Conexión', 'No hay conexión con el servidor');
+      return;
+    }
+
+    // Enviar rechazo
+    ws.current.send(JSON.stringify({
+      type: 'hospital_reject_patient',
+      notificationId: notification.notificationId,
+      hospitalId: hospitalInfo.id,
+      reason: 'Capacidad limitada - No hay camas disponibles'
+    }));
+
+    setPatientNotifications(prev => 
+      prev.filter(n => n.notificationId !== notification.notificationId)
+    );
+    
+    clearRoute();
+    showToast('warning', 'Paciente Rechazado', 'Se ha notificado a la ambulancia');
+    onNotificationClose();
+  };
+
+  const sendNoteToAmbulance = () => {
+    if (!selectedAmbulance || !noteMessage.trim()) {
+      showToast('warning', 'Mensaje Vacío', 'Escribe un mensaje para el conductor');
+      return;
+    }
+
+    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+      showToast('error', 'Error de Conexión', 'No hay conexión con el servidor');
+      return;
+    }
+
+    ws.current.send(JSON.stringify({
+      type: 'hospital_note',
+      ambulanceId: selectedAmbulance.id,
+      hospitalId: hospitalInfo.id,
+      note: {
+        id: Date.now(),
+        message: noteMessage,
+        patientInfo: patientInfo,
+        hospitalInfo: hospitalInfo,
+        timestamp: new Date().toLocaleTimeString()
+      }
+    }));
+
+    showToast('success', 'Mensaje Enviado', 'Comunicación enviada al conductor');
+    setNoteMessage('');
+    setPatientInfo('');
+    onNoteClose();
+  };
+
+  const requestRouteUpdate = (ambulanceId) => {
+    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+      showToast('error', 'Error de Conexión', 'No hay conexión con el servidor');
+      return;
+    }
+
+    ws.current.send(JSON.stringify({
+      type: 'request_route_update',
+      ambulanceId: ambulanceId
+    }));
+
+    showToast('info', 'Solicitando Actualización', 'Actualizando información de ruta...');
+  };
+
+  // ---------- UTILITY FUNCTIONS ----------
   const showToast = (status, title, description) => {
     toast({
       title,
@@ -73,777 +868,305 @@ function MapaHospital() {
       status,
       duration: 4000,
       isClosable: true,
-      position: "top-right",
+      position: 'top-right'
     });
   };
 
-  // Seguridad: devuelve campo o valor por defecto
-  const safe = (obj, key, fallback = "") => (obj && obj[key] !== undefined ? obj[key] : fallback);
-
-  // -----------------------------
-  // WebSocket: conectar (solo crea conexión)
-  // -----------------------------
-  const connectWebSocket = () => {
-    try {
-      if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-        console.log("WebSocket ya abierto/intentando abrir.");
-        return;
-      }
-
-      console.log("🏥 Conectando hospital al WebSocket...");
-      ws.current = new WebSocket("ws://localhost:3002/ws");
-
-      ws.current.onopen = () => {
-        console.log("✅ Hospital conectado al servidor WebSocket");
-        setWsConnected(true);
-        showToast("success", "Conectado al servidor", "Conexión WebSocket establecida");
-        // NOTA: envío de registro será manejado por useEffect que observa wsConnected + hospitalInfo
-      };
-
-      ws.current.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          console.log("📨 Mensaje recibido en hospital:", data.type);
-
-          switch (data.type) {
-            case "connection_established":
-              console.log("✅ Conexión WebSocket confirmada (server).");
-              break;
-
-            case "active_ambulances_update":
-              setActiveAmbulances(data.ambulances || []);
-              updateAmbulanceMarkers(data.ambulances || []);
-              break;
-
-            case "location_update":
-              updateAmbulanceLocation(data);
-              break;
-
-            case "navigation_started":
-            case "navigation_finished":
-              updateAmbulanceStatus(data);
-              break;
-
-            case "patient_transfer_notification":
-              handlePatientTransferNotification(data);
-              break;
-
-            case "route_update":
-              if (data.routeGeometry) {
-                displayRouteOnMap(data.routeGeometry, data.eta, data.distance);
-                setActiveRoute({
-                  ambulanceId: data.ambulanceId,
-                  eta: data.eta,
-                  distance: data.distance,
-                  geometry: data.routeGeometry,
-                });
-              }
-              break;
-
-            case "patient_accepted":
-              if (data.hospitalId === hospitalInfo?.id) {
-                setPatientNotifications((prev) => prev.filter((n) => n.notificationId !== data.notificationId));
-                showToast("success", "Paciente aceptado", "Se ha confirmado la recepción del paciente");
-              }
-              break;
-
-            case "error":
-              console.error("❌ Error del servidor:", data.message);
-              showToast("error", "Error del servidor", data.message || "Error desconocido");
-              break;
-
-            default:
-              console.log("📨 Mensaje no procesado:", data);
-          }
-        } catch (error) {
-          console.error("❌ Error procesando mensaje WS:", error);
-        }
-      };
-
-      ws.current.onclose = (event) => {
-        console.log("🔌 WebSocket cerrado:", event.code, event.reason);
-        setWsConnected(false);
-
-        // Reconexión automática salvo cierre normal (1000)
-        if (event.code !== 1000) {
-          showToast("warning", "Conexión perdida", "Reconectando WebSocket...");
-          reconnectTimeout.current = setTimeout(() => {
-            connectWebSocket();
-          }, 3000);
-        }
-      };
-
-      ws.current.onerror = (error) => {
-        console.error("❌ Error WebSocket:", error);
-        setWsConnected(false);
-        showToast("error", "Error WebSocket", "No se pudo establecer conexión WebSocket");
-      };
-    } catch (error) {
-      console.error("❌ Error al crear WebSocket:", error);
-    }
-  };
-
-  // Enviar mensaje seguro por ws
-  const safeSend = (payload) => {
-    try {
-      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify(payload));
-      } else {
-        console.warn("WS no abierto, no se envió:", payload);
-      }
-    } catch (err) {
-      console.error("❌ safeSend error:", err);
-    }
-  };
-
-  // -----------------------------
-  // Handler: notificación de traslado
-  // -----------------------------
-  const handlePatientTransferNotification = (data) => {
-    console.log("🚨 Notificación de traslado recibida:", data);
-    const notificationData = {
-      ...data,
-      timestamp: new Date().toLocaleString(),
-      id: data.notificationId || `notif_${Date.now()}`,
-    };
-
-    setPatientNotifications((prev) => [...prev, notificationData]);
-    setSelectedNotification(notificationData);
-
-    if (data.routeGeometry) {
-      displayRouteOnMap(data.routeGeometry, data.eta, data.distance);
-      setActiveRoute({
-        ambulanceId: data.ambulanceId,
-        eta: data.eta,
-        distance: data.distance,
-        geometry: data.routeGeometry,
-      });
-    }
-
-    showToast("info", "Nuevo paciente en camino", `Ambulancia ${data.ambulanceInfo?.id || ""} - ETA: ${data.eta || "?"} min`);
-    onNotificationOpen();
-  };
-
-  // -----------------------------
-  // Rutas / Mapbox helpers
-  // -----------------------------
-  const clearRouteFromMap = () => {
-    if (!map) return;
-    routeLayerIds.current.forEach((id) => {
-      if (map.getLayer(id)) {
-        try {
-          map.removeLayer(id);
-        } catch (e) {
-          /* ignore */
-        }
-      }
-      if (map.getSource(id)) {
-        try {
-          map.removeSource(id);
-        } catch (e) {
-          /* ignore */
-        }
-      }
-    });
-    routeLayerIds.current = [];
-    setActiveRoute(null);
-  };
-
-  const displayRouteOnMap = (routeGeometry, eta, distance) => {
-    if (!map || !routeGeometry || !Array.isArray(routeGeometry)) return;
-
-    // Limpiar ruta anterior
-    clearRouteFromMap();
-
-    const routeId = "hospital-route";
-    const routeColor = "#00FFFC";
-
-    // Si la source ya existe (por seguridad) removerla
-    if (map.getSource(routeId)) {
-      try {
-        map.removeLayer(routeId);
-        map.removeSource(routeId);
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    // Agregar fuente y capas
-    map.addSource(routeId, {
-      type: "geojson",
-      data: {
-        type: "Feature",
-        geometry: {
-          type: "LineString",
-          coordinates: routeGeometry,
-        },
-        properties: {},
-      },
-    });
-
-    map.addLayer({
-      id: routeId,
-      type: "line",
-      source: routeId,
-      layout: { "line-join": "round", "line-cap": "round" },
-      paint: { "line-color": routeColor, "line-width": 6, "line-opacity": 0.95 },
-    });
-
-    map.addLayer(
-      {
-        id: routeId + "-glow",
-        type: "line",
-        source: routeId,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": routeColor, "line-width": 12, "line-opacity": 0.35, "line-blur": 1.5 },
-      },
-      routeId
-    );
-
-    map.addLayer(
-      {
-        id: routeId + "-outline",
-        type: "line",
-        source: routeId,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#FFFFFF", "line-width": 10, "line-opacity": 0.2 },
-      },
-      routeId + "-glow"
-    );
-
-    routeLayerIds.current = [routeId, routeId + "-glow", routeId + "-outline"];
-    console.log("🗺️ Ruta mostrada en el mapa del hospital");
-  };
-
-  const fitMapToRoute = (routeGeometry) => {
-    if (!map || !routeGeometry) return;
-    const bounds = new mapboxgl.LngLatBounds();
-    routeGeometry.forEach((coord) => {
-      if (Array.isArray(coord) && coord.length >= 2) bounds.extend([coord[0], coord[1]]);
-    });
-    // incluir hospital si existe
-    if (hospitalInfo?.lng && hospitalInfo?.lat) bounds.extend([hospitalInfo.lng, hospitalInfo.lat]);
-    map.fitBounds(bounds, { padding: 100, duration: 2000, pitch: 45 });
-  };
-
-  // -----------------------------
-  // Markers ambulancias / hospital
-  // -----------------------------
-  const createAmbulanceMarkerElement = (ambulance) => {
-    const wrapper = document.createElement("div");
-    wrapper.innerHTML = `
-      <div style="
-        width: 45px;
-        height: 45px;
-        background: #ff4444;
-        border: 3px solid white;
-        border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        font-weight: bold;
-        font-size: 20px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-      ">🚑</div>
-    `;
-    wrapper.style.cursor = "pointer";
-    wrapper.style.transformOrigin = "center center";
-    return wrapper;
-  };
-
-  const addHospitalMarker = (mapInstance) => {
-    if (!hospitalInfo || !mapInstance) return;
-
-    // remover marcador antiguo si existe
-    try {
-      if (hospitalMarker.current) {
-        hospitalMarker.current.remove();
-        hospitalMarker.current = null;
-      }
-    } catch (e) {
-      /* ignore */
-    }
-
-    const popupHtml = `
-      <div style="padding:12px; max-width:250px;">
-        <strong style="font-size:16px;">🏥 ${hospitalInfo.nombre || "Hospital"}</strong><br/>
-        <div style="margin:8px 0;">
-          <strong>📍 Dirección:</strong> ${hospitalInfo.direccion || "No disponible"}<br/>
-          <strong>🏷️ ID:</strong> ${hospitalInfo.id || "N/A"}
-        </div>
-        <em style="color:#666; font-size:12px;">Hospital registrado y operativo</em>
-      </div>
-    `;
-
-    const el = document.createElement("div");
-    el.innerHTML = `
-      <div style="
-        width:50px;
-        height:50px;
-        background:#4caf50;
-        border:3px solid white;
-        border-radius:50%;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        color:white;
-        font-weight:bold;
-        font-size:24px;
-        box-shadow:0 4px 12px rgba(0,0,0,0.3);
-      ">🏥</div>
-    `;
-    el.style.cursor = "pointer";
-
-    hospitalMarker.current = new mapboxgl.Marker(el)
-      .setLngLat([hospitalInfo.lng || -101.1969319, hospitalInfo.lat || 19.702428])
-      .setPopup(new mapboxgl.Popup({ offset: 25 }).setHTML(popupHtml))
-      .addTo(mapInstance);
-  };
-
-  const updateAmbulanceMarkers = (ambulances) => {
-    if (!map) return;
-
-    // eliminar marcadores antiguos
-    Object.values(ambulanceMarkers.current).forEach((marker) => {
-      try {
-        marker.remove();
-      } catch (e) {
-        /* ignore */
-      }
-    });
-    ambulanceMarkers.current = {};
-
-    // crear nuevos
-    (ambulances || []).forEach((ambulance) => {
-      if (ambulance?.location?.lat !== undefined && ambulance?.location?.lng !== undefined) {
-        const el = createAmbulanceMarkerElement(ambulance);
-        const marker = new mapboxgl.Marker({ element: el, anchor: "center" })
-          .setLngLat([ambulance.location.lng, ambulance.location.lat])
-          .addTo(map);
-
-        const popupHtml = `
-          <div style="padding:8px;">
-            <strong>🚑 ${ambulance.id || ""}</strong><br/>
-            Placa: ${ambulance.placa || "N/A"}<br/>
-            Tipo: ${ambulance.tipo || "N/A"}<br/>
-            Estado: ${ambulance.status === "en_ruta" ? "EN RUTA" : "DISPONIBLE"}<br/>
-            Velocidad: ${ambulance.speed || 0} km/h
-          </div>
-        `;
-        marker.setPopup(new mapboxgl.Popup({ offset: 25 }).setHTML(popupHtml));
-        ambulanceMarkers.current[ambulance.id] = marker;
-      }
+  const centerOnHospital = () => {
+    if (!map.current || !hospitalInfo) return;
+    
+    map.current.flyTo({
+      center: [hospitalInfo.lng, hospitalInfo.lat],
+      zoom: 16,
+      pitch: 45,
+      duration: 1000
     });
   };
 
-  const updateAmbulanceLocation = (data) => {
-    const marker = ambulanceMarkers.current[data.ambulanceId];
-    if (marker && data.location) {
-      marker.setLngLat([data.location.lng, data.location.lat]);
-      const el = marker.getElement();
-      if (el) el.style.transform = `rotate(${data.location.heading || 0}deg)`;
-      setActiveAmbulances((prev) =>
-        prev.map((amb) => (amb.id === data.ambulanceId ? { ...amb, location: data.location, speed: data.speed } : amb))
-      );
-    }
-  };
-
-  const updateAmbulanceStatus = (data) => {
-    setActiveAmbulances((prev) => prev.map((amb) => (amb.id === data.ambulanceId ? { ...amb, status: data.status } : amb)));
-  };
-
-  // -----------------------------
-  // Efectos: conexión WS + carga del hospital + mapa
-  // -----------------------------
-
-  // 1) Crear conexión WebSocket al montar
-  useEffect(() => {
-    connectWebSocket();
-    return () => {
-      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-      if (ws.current) {
-        try {
-          ws.current.close(1000, "Componente desmontado");
-        } catch (e) {
-          /* ignore */
-        }
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // solo al montar
-
-  // 2) Enviar registro del hospital al servidor cuando WS esté listo y hospitalInfo exista
-  useEffect(() => {
-    if (ws.current && wsConnected && hospitalInfo) {
-      safeSend({
-        type: "register_hospital",
-        hospital: hospitalInfo,
-      });
-      showToast("success", "Registrado", "Hospital registrado en servidor WebSocket");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsConnected, hospitalInfo]);
-
-  // 3) Cargar hospital desde localStorage y verificar en backend
-  useEffect(() => {
-    const loadHospitalData = async () => {
-      try {
-        const stored = JSON.parse(localStorage.getItem("hospitalInfo"));
-        if (!stored || !stored.id) {
-          console.warn("No hay hospitalInfo en localStorage");
-          // podrías redirigir al login aquí si quieres
-          return;
-        }
-
-        // Intentar obtener datos reales desde la API (verifica tu endpoint)
-        try {
-          const resp = await fetch(`${import.meta.env.VITE_API}/hospital/${stored.id}`);
-          if (!resp.ok) {
-            console.warn("No se obtuvo hospital desde la API, usando datos guardados en sesión.");
-            // usar la info almacenada como fallback
-            setHospitalInfo({
-              id: stored.id,
-              nombre: stored.nombre || "Hospital",
-              direccion: stored.direccion || "",
-              lat: stored.ubicacion?.lat || stored.lat,
-              lng: stored.ubicacion?.lng || stored.lng,
-            });
-            return;
-          }
-          const dbHospital = await resp.json();
-          setHospitalInfo({
-            id: dbHospital.id_hospitales || stored.id,
-            nombre: dbHospital.nombre || stored.nombre || "Hospital",
-            direccion: dbHospital.direccion || stored.direccion || "",
-            lat: stored.ubicacion?.lat || dbHospital.lat || 19.702428,
-            lng: stored.ubicacion?.lng || dbHospital.lng || -101.1969319,
-          });
-        } catch (err) {
-          console.error("Error fetching hospital:", err);
-          // fallback a localStorage
-          setHospitalInfo({
-            id: stored.id,
-            nombre: stored.nombre || "Hospital",
-            direccion: stored.direccion || "",
-            lat: stored.ubicacion?.lat || 19.702428,
-            lng: stored.ubicacion?.lng || -101.1969319,
-          });
-        }
-      } catch (error) {
-        console.error("Error cargando hospital desde localStorage:", error);
-      }
-    };
-
-    loadHospitalData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // 4) Inicializar mapa cuando tengamos hospitalInfo (asegura center correcto)
-  useEffect(() => {
-    if (!hospitalInfo) return;
-    if (!mapContainer.current) return;
-
-    const center = [hospitalInfo.lng || -101.1969319, hospitalInfo.lat || 19.702428];
-
-    const mapInstance = new mapboxgl.Map({
-      container: mapContainer.current,
-      style: "mapbox://styles/mapbox/light-v11",
-      center,
-      zoom: 12,
-    });
-
-    mapInstance.addControl(new mapboxgl.NavigationControl());
-
-    mapInstance.on("load", () => {
-      setMap(mapInstance);
-      addHospitalMarker(mapInstance);
-    });
-
-    // cleanup
-    return () => {
-      try {
-        mapInstance.remove();
-      } catch (e) {
-        /* ignore */
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hospitalInfo]);
-
-  // -----------------------------
-  // Acciones / Botones
-  // -----------------------------
-  const acceptPatient = (notification) => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      safeSend({
-        type: "hospital_accept_patient",
-        notificationId: notification.notificationId,
-        hospitalId: hospitalInfo?.id,
-        hospitalInfo,
-      });
-
-      setPatientNotifications((prev) => prev.filter((notif) => notif.notificationId !== notification.notificationId));
-      showToast("success", "Paciente aceptado", "Se ha confirmado la recepción del paciente");
-      onNotificationClose();
-    } else {
-      showToast("error", "Error", "No hay conexión con el servidor");
-    }
-  };
-
-  const rejectPatient = (notification) => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      safeSend({
-        type: "hospital_reject_patient",
-        notificationId: notification.notificationId,
-        hospitalId: hospitalInfo?.id,
-        reason: "Capacidad limitada - No hay camas disponibles",
-      });
-
-      setPatientNotifications((prev) => prev.filter((notif) => notif.notificationId !== notification.notificationId));
-      clearRouteFromMap();
-      showToast("warning", "Paciente rechazado", "Se ha notificado a la ambulancia");
-      onNotificationClose();
-    } else {
-      showToast("error", "Error", "No hay conexión con el servidor");
-    }
-  };
-
-  const sendNoteToDriver = () => {
-    if (!selectedAmbulance || !noteMessage.trim()) {
-      showToast("warning", "Advertencia", "Escribe un mensaje para el conductor");
-      return;
-    }
-
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      safeSend({
-        type: "hospital_note",
-        ambulanceId: selectedAmbulance.id,
-        hospitalId: hospitalInfo?.id,
-        note: {
-          id: Date.now(),
-          message: noteMessage,
-          patientInfo,
-          hospitalInfo,
-          timestamp: new Date().toLocaleTimeString(),
-        },
-      });
-
-      showToast("success", "Nota enviada", "Mensaje enviado al conductor de la ambulancia");
-      setNoteMessage("");
-      setPatientInfo("");
-      onNoteClose();
-    } else {
-      showToast("error", "Error", "No hay conexión con el servidor");
-    }
-  };
-
-  const requestRouteUpdate = (ambulanceId) => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      safeSend({ type: "request_route_update", ambulanceId });
-    } else {
-      showToast("error", "Error", "No hay conexión con el servidor");
-    }
-  };
-
-  const reconnectWebSocket = () => {
+  const reconnect = () => {
     if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-    if (ws.current) {
-      try {
-        ws.current.close(1000, "Reconexion manual");
-      } catch (e) {
-        /* ignore */
-      }
-      ws.current = null;
-    }
+    connectionAttempts.current = 0;
     connectWebSocket();
   };
 
-  // -----------------------------
-  // Protección del render: si hospitalInfo aún no existe mostramos loader
-  // (esto se coloca después de todos los hooks)
-  // -----------------------------
+  // ---------- RENDER ----------
   if (!hospitalInfo) {
     return (
-      <ChakraProvider theme={theme}>
-        <Box p={10} textAlign="center">
-          <Text fontSize="2xl" fontWeight="bold">
-            Cargando información del hospital...
-          </Text>
+      <ChakraProvider>
+        <Box height="100vh" display="flex" alignItems="center" justifyContent="center" bg="gray.50">
+          <VStack spacing={4}>
+            <Text fontSize="2xl" fontWeight="bold" color="gray.800">
+              Configurando Sistema Hospitalario...
+            </Text>
+            <Progress size="lg" width="300px" isIndeterminate colorScheme="blue" />
+            <Text color="gray.600" textAlign="center">
+              Verificando ubicación y conectando servicios
+            </Text>
+          </VStack>
         </Box>
       </ChakraProvider>
     );
   }
 
-  // -----------------------------
-  // JSX principal (cuando hospitalInfo existe)
-  // -----------------------------
   return (
-    <ChakraProvider theme={theme}>
-      <Box height="100vh" display="flex" flexDirection="column">
+    <ChakraProvider>
+      <Box height="100vh" display="flex" flexDirection="column" bg="gray.50">
         {/* Header */}
-        <Box bg="blue.600" color="white" p={4} boxShadow="md">
+        <Box bg="white" p={4} boxShadow="sm" borderBottom="1px" borderColor="gray.200">
           <HStack justifyContent="space-between">
             <VStack align="start" spacing={0}>
-              <Text fontSize="xl" fontWeight="bold">
+              <Text fontSize="xl" fontWeight="bold" color="gray.800">
                 🏥 {hospitalInfo.nombre}
               </Text>
-              <Text fontSize="sm" opacity={0.9}>
-                Centro de Control Hospitalario - Monitoreo de Ambulancias
-                <Badge ml={2} colorScheme={wsConnected ? "green" : "red"} fontSize="xs">
-                  {wsConnected ? "Conectado" : "Desconectado"}
+              <Text fontSize="sm" color="gray.600">
+                Centro de Control Hospitalario - Monitoreo de Emergencias
+                <Badge ml={2} colorScheme={wsConnected ? "green" : isConnecting ? "yellow" : "red"} fontSize="xs">
+                  {wsConnected ? "SISTEMA CONECTADO" : isConnecting ? "CONECTANDO..." : "SIN CONEXIÓN"}
                 </Badge>
               </Text>
             </VStack>
 
             <HStack spacing={4}>
-              <Badge colorScheme="green" fontSize="md" p={2}>
-                {activeAmbulances.length} Ambulancias Activas
+              <Badge colorScheme="blue" fontSize="md" p={2} borderRadius="md">
+                {ambulances.length} AMBULANCIAS
               </Badge>
 
-              {activeRoute && (
-                <Badge colorScheme="purple" fontSize="md" p={2}>
-                  🕐 {activeRoute.eta} min • 📏 {activeRoute.distance} km
-                </Badge>
-              )}
-
               {patientNotifications.length > 0 && (
-                <Badge colorScheme="red" fontSize="md" p={2} cursor="pointer" onClick={onNotificationOpen}>
-                  {patientNotifications.length} Notificaciones
+                <Badge colorScheme="red" fontSize="md" p={2} borderRadius="md" cursor="pointer" onClick={onNotificationOpen}>
+                  {patientNotifications.length} NOTIFICACIONES
                 </Badge>
               )}
 
-              <Button size="sm" colorScheme={wsConnected ? "green" : "orange"} onClick={reconnectWebSocket}>
-                {wsConnected ? "✅ Conectado" : "🔌 Reconectar"}
+              {activeRoute && (
+                <Badge colorScheme="purple" fontSize="md" p={2} borderRadius="md">
+                  🕐 {Math.round(activeRoute.duration / 60)} min • 📏 {(activeRoute.distance / 1000).toFixed(1)} km
+                </Badge>
+              )}
+
+              <Button size="sm" colorScheme={wsConnected ? "green" : isConnecting ? "yellow" : "orange"} onClick={reconnect} isDisabled={isConnecting}>
+                {isConnecting ? <Spinner size="sm" /> : wsConnected ? "✅ CONECTADO" : "🔌 RECONECTAR"}
               </Button>
             </HStack>
           </HStack>
         </Box>
 
-        {/* Contenido */}
+        {/* Main Content */}
         <Box flex={1} display="flex">
-          {/* Panel lateral */}
-          <Box width="400px" bg="gray.50" p={4} overflowY="auto" boxShadow="md">
-            <Text fontSize="lg" fontWeight="bold" mb={4} color="gray.700">
-              🚑 Ambulancias Activas
-            </Text>
+          {/* Side Panel */}
+          <Box width="480px" bg="white" p={4} overflowY="auto" boxShadow="md" borderRight="1px" borderColor="gray.200">
+            <VStack spacing={6} align="stretch">
+              {/* Hospital Info */}
+              <Card bg="blue.50" border="1px" borderColor="blue.200">
+                <CardBody>
+                  <Text fontWeight="bold" mb={3} color="blue.800">🏥 Información del Hospital</Text>
+                  <VStack align="start" spacing={2}>
+                    <Text fontSize="sm"><strong>Dirección:</strong> {hospitalInfo.direccion}</Text>
+                    <Text fontSize="sm"><strong>Teléfono:</strong> {hospitalInfo.telefono || 'No disponible'}</Text>
+                    <Text fontSize="sm"><strong>Camas disponibles:</strong> {hospitalInfo.camasDisponibles}</Text>
+                    <Text fontSize="sm"><strong>Especialidades:</strong> {hospitalInfo.especialidades.join(', ')}</Text>
+                  </VStack>
+                </CardBody>
+              </Card>
 
-            {activeAmbulances.length === 0 ? (
-              <Text color="gray.500" textAlign="center" py={8}>
-                No hay ambulancias activas
-              </Text>
-            ) : (
-              <VStack spacing={3} align="stretch">
-                {activeAmbulances.map((ambulance) => (
-                  <Box
-                    key={ambulance.id}
-                    p={3}
-                    border="1px"
-                    borderColor="gray.200"
-                    borderRadius="md"
-                    bg="white"
-                    cursor="pointer"
-                    onClick={() => setSelectedAmbulance(ambulance)}
-                    boxShadow={selectedAmbulance?.id === ambulance.id ? "outline" : "sm"}
-                    transition="all 0.2s"
-                  >
-                    <HStack justifyContent="space-between" mb={2}>
-                      <Text fontWeight="bold" color="red.600">
-                        {ambulance.id}
-                      </Text>
-                      <Badge colorScheme={ambulance.status === "en_ruta" ? "green" : "orange"}>
-                        {ambulance.status === "en_ruta" ? "EN RUTA" : "DISPONIBLE"}
-                      </Badge>
-                    </HStack>
-
-                    <Text fontSize="sm" color="gray.600">
-                      Placa: {ambulance.placa || "N/A"}
-                    </Text>
-                    <Text fontSize="sm" color="gray.600">
-                      Tipo: {ambulance.tipo || "N/A"}
-                    </Text>
-                    {ambulance.location && (
-                      <Text fontSize="sm" color="gray.600">
-                        Velocidad: {Math.round(ambulance.speed || 0)} km/h
-                      </Text>
-                    )}
-
-                    {activeRoute && activeRoute.ambulanceId === ambulance.id && (
-                      <Box mt={2} p={2} bg="blue.50" borderRadius="md">
-                        <Text fontSize="sm" fontWeight="bold" color="blue.700">
-                          📊 Ruta Activa
-                        </Text>
-                        <Text fontSize="sm" color="blue.600">
-                          🕐 {activeRoute.eta} min • 📏 {activeRoute.distance} km
-                        </Text>
-                      </Box>
-                    )}
-                  </Box>
-                ))}
-              </VStack>
-            )}
-
-            {/* Info de ruta activa */}
-            {activeRoute && (
-              <Box mt={6} p={4} bg="white" borderRadius="md" border="1px" borderColor="gray.200">
-                <Text fontSize="lg" fontWeight="bold" mb={2} color="gray.700">
-                  📊 Ruta Activa
-                </Text>
-                <VStack align="start" spacing={1}>
-                  <Text>
-                    <strong>Ambulancia:</strong> {activeRoute.ambulanceId}
+              {/* Ambulances List */}
+              <Box>
+                <HStack justify="space-between" mb={3}>
+                  <Text fontWeight="bold" color="gray.800">🚑 Ambulancias en Servicio</Text>
+                  <Text fontSize="sm" color="gray.600">
+                    {ambulances.length} conectadas
                   </Text>
-                  <Text>
-                    <strong>Tiempo estimado:</strong> {activeRoute.eta} minutos
-                  </Text>
-                  <Text>
-                    <strong>Distancia:</strong> {activeRoute.distance} km
-                  </Text>
-                </VStack>
-                <Button size="sm" colorScheme="blue" width="100%" mt={3} onClick={() => activeRoute.geometry && fitMapToRoute(activeRoute.geometry)}>
-                  🗺️ Ajustar mapa a ruta
-                </Button>
-              </Box>
-            )}
+                </HStack>
 
-            {/* Acciones */}
-            {selectedAmbulance && (
-              <VStack spacing={3} mt={6}>
-                <Button colorScheme="blue" width="100%" onClick={onNoteOpen} disabled={!wsConnected}>
-                  📋 Enviar Nota al Conductor
-                </Button>
-                {activeRoute && activeRoute.ambulanceId === selectedAmbulance.id && (
-                  <Button colorScheme="purple" width="100%" onClick={() => requestRouteUpdate(selectedAmbulance.id)} disabled={!wsConnected}>
-                    🔄 Actualizar Ruta
-                  </Button>
+                {ambulances.length === 0 ? (
+                  <Text color="gray.500" textAlign="center" py={4} fontSize="sm">
+                    No hay ambulancias activas en el sistema
+                  </Text>
+                ) : (
+                  <VStack spacing={3} align="stretch">
+                    {ambulances.map(ambulance => (
+                      <Card 
+                        key={ambulance.id}
+                        bg={selectedAmbulance?.id === ambulance.id ? "blue.50" : "white"}
+                        border="1px"
+                        borderColor={selectedAmbulance?.id === ambulance.id ? "blue.200" : "gray.200"}
+                        cursor="pointer"
+                        onClick={() => setSelectedAmbulance(ambulance)}
+                        _hover={{ borderColor: "blue.300", transform: 'translateY(-1px)' }}
+                        transition="all 0.2s"
+                      >
+                        <CardBody p={3}>
+                          <HStack justify="space-between" mb={2}>
+                            <Text fontWeight="bold" color="red.600" fontSize="sm">{ambulance.id}</Text>
+                            <Badge colorScheme={ambulance.status === 'en_ruta' ? "green" : "orange"} fontSize="2xs">
+                              {ambulance.status === 'en_ruta' ? 'EN RUTA' : 'DISPONIBLE'}
+                            </Badge>
+                          </HStack>
+                          
+                          <VStack align="start" spacing={1}>
+                            <Text fontSize="sm">📋 {ambulance.placa || 'N/A'}</Text>
+                            <Text fontSize="sm">🔧 {ambulance.tipo || 'N/A'}</Text>
+                            {ambulance.location && (
+                              <Text fontSize="sm">💨 {ambulance.speed || 0} km/h</Text>
+                            )}
+                          </VStack>
+
+                          {activeRoute && activeRoute.ambulanceId === ambulance.id && (
+                            <Box mt={2} p={2} bg="blue.100" borderRadius="md">
+                              <Text fontSize="sm" fontWeight="bold" color="blue.800">📊 Ruta Activa</Text>
+                              <Text fontSize="xs" color="blue.700">
+                                🕐 {Math.round(activeRoute.duration / 60)} min • 📏 {(activeRoute.distance / 1000).toFixed(1)} km
+                              </Text>
+                            </Box>
+                          )}
+
+                          <HStack mt={3} spacing={2}>
+                            <Button 
+                              size="xs" 
+                              colorScheme="blue"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (ambulance.location) {
+                                  map.current.flyTo({
+                                    center: [ambulance.location.lng, ambulance.location.lat],
+                                    zoom: 15,
+                                    duration: 1000
+                                  });
+                                }
+                              }}
+                            >
+                              👁️ Seguir
+                            </Button>
+                            <Button 
+                              size="xs" 
+                              colorScheme="teal"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                calculateRouteToAmbulance(ambulance);
+                              }}
+                            >
+                              🛣️ Trazar Ruta
+                            </Button>
+                            <Button 
+                              size="xs" 
+                              colorScheme="purple"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onNoteOpen();
+                              }}
+                            >
+                              💬 Nota
+                            </Button>
+                          </HStack>
+                        </CardBody>
+                      </Card>
+                    ))}
+                  </VStack>
                 )}
+              </Box>
+
+              {/* Active Route Info */}
+              {activeRoute && (
+                <Card bg="purple.50" border="1px" borderColor="purple.200">
+                  <CardBody>
+                    <Text fontWeight="bold" mb={2} color="purple.800">📊 Ruta Activa</Text>
+                    <VStack align="start" spacing={1}>
+                      <Text fontSize="sm"><strong>Ambulancia:</strong> {activeRoute.ambulanceId}</Text>
+                      <Text fontSize="sm"><strong>Distancia:</strong> {(activeRoute.distance / 1000).toFixed(1)} km</Text>
+                      <Text fontSize="sm"><strong>Tiempo estimado:</strong> {Math.round(activeRoute.duration / 60)} min</Text>
+                    </VStack>
+                    <Progress value={70} size="sm" colorScheme="purple" mt={3} borderRadius="full" />
+                    <Button 
+                      size="sm" 
+                      colorScheme="blue" 
+                      width="100%" 
+                      mt={3}
+                      onClick={() => {
+                        if (activeRoute.geometry) {
+                          const bounds = new mapboxgl.LngLatBounds();
+                          activeRoute.geometry.forEach(coord => {
+                            bounds.extend([coord[0], coord[1]]);
+                          });
+                          if (hospitalInfo) {
+                            bounds.extend([hospitalInfo.lng, hospitalInfo.lat]);
+                          }
+                          map.current.fitBounds(bounds, { padding: 80, duration: 1000 });
+                        }
+                      }}
+                    >
+                      🗺️ Ajustar Vista
+                    </Button>
+                  </CardBody>
+                </Card>
+              )}
+
+              {/* Quick Actions */}
+              <VStack spacing={2}>
+                <Button 
+                  width="100%" 
+                  colorScheme="blue" 
+                  onClick={centerOnHospital}
+                  leftIcon={<Text>🎯</Text>}
+                >
+                  Centrar en Hospital
+                </Button>
+                <Button 
+                  width="100%" 
+                  colorScheme={trafficEnabled ? "orange" : "blue"}
+                  onClick={toggleTraffic}
+                  leftIcon={<Text>🚦</Text>}
+                  variant={trafficEnabled ? "solid" : "outline"}
+                >
+                  {trafficEnabled ? 'Ocultar Tráfico' : 'Mostrar Tráfico'}
+                </Button>
               </VStack>
-            )}
+            </VStack>
           </Box>
 
-          {/* Mapa */}
+          {/* Map */}
           <Box flex={1} position="relative">
-            <div ref={mapContainer} style={{ width: "100%", height: "100%" }} />
+            <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
 
-            {/* Info ruta sobre el mapa */}
+            {/* Route Info Overlay */}
             {activeRoute && (
-              <Box position="absolute" top="20px" left="20px" bg="rgba(255,255,255,0.95)" p={3} borderRadius="md" boxShadow="lg" maxWidth="300px" zIndex="1">
-                <Text fontWeight="bold" mb={2} color="gray.700">
-                  📊 Ruta Activa - {activeRoute.ambulanceId}
-                </Text>
+              <Box
+                position="absolute"
+                top="20px"
+                left="20px"
+                bg="white"
+                color="gray.800"
+                p={4}
+                borderRadius="md"
+                boxShadow="xl"
+                border="1px"
+                borderColor="gray.200"
+                zIndex="1000"
+                minWidth="320px"
+              >
+                <Text fontWeight="bold" mb={2} color="blue.600">📊 Ruta Activa - {activeRoute.ambulanceId}</Text>
                 <VStack align="start" spacing={1}>
-                  <Text fontSize="sm">
-                    <strong>🕐 ETA:</strong> {activeRoute.eta} minutos
-                  </Text>
-                  <Text fontSize="sm">
-                    <strong>📏 Distancia:</strong> {activeRoute.distance} km
-                  </Text>
-                  <Text fontSize="sm">
-                    <strong>🏥 Destino:</strong> {hospitalInfo.nombre}
-                  </Text>
+                  <Text fontSize="sm"><strong>🕐 ETA:</strong> {Math.round(activeRoute.duration / 60)} minutos</Text>
+                  <Text fontSize="sm"><strong>📏 Distancia:</strong> {(activeRoute.distance / 1000).toFixed(1)} km</Text>
+                  <Text fontSize="sm"><strong>🏥 Destino:</strong> {hospitalInfo.nombre}</Text>
                 </VStack>
-                <Button size="xs" colorScheme="blue" mt={2} onClick={() => fitMapToRoute(activeRoute.geometry)}>
-                  🗺️ Ajustar vista
+                <Progress value={65} size="sm" colorScheme="blue" mt={2} borderRadius="full" />
+                <Button 
+                  size="xs" 
+                  colorScheme="blue" 
+                  mt={2}
+                  onClick={() => {
+                    if (activeRoute.geometry) {
+                      const bounds = new mapboxgl.LngLatBounds();
+                      activeRoute.geometry.forEach(coord => {
+                        bounds.extend([coord[0], coord[1]]);
+                      });
+                      if (hospitalInfo) {
+                        bounds.extend([hospitalInfo.lng, hospitalInfo.lat]);
+                      }
+                      map.current.fitBounds(bounds, { padding: 80, duration: 1000 });
+                    }
+                  }}
+                >
+                  🗺️ Ajustar Vista
                 </Button>
               </Box>
             )}
@@ -851,115 +1174,135 @@ function MapaHospital() {
         </Box>
       </Box>
 
-      {/* Modal: enviar nota */}
-      <Modal isOpen={isNoteOpen} onClose={onNoteClose}>
+      {/* Note Modal */}
+      <Modal isOpen={isNoteOpen} onClose={onNoteClose} size="md">
         <ModalOverlay />
         <ModalContent>
-          <ModalHeader>📋 Enviar Nota al Conductor</ModalHeader>
-          <ModalBody>
+          <ModalHeader bg="blue.600" color="white">
+            💬 Enviar Mensaje al Conductor
+          </ModalHeader>
+          <ModalBody py={4}>
             <VStack spacing={4}>
               <Text fontSize="sm" color="gray.600">
                 Para: {selectedAmbulance?.id} - {selectedAmbulance?.placa}
               </Text>
 
-              <Textarea placeholder="Escribe tu mensaje para el conductor..." value={noteMessage} onChange={(e) => setNoteMessage(e.target.value)} rows={3} />
+              <Textarea 
+                placeholder="Escribe tu mensaje para el conductor de la ambulancia..."
+                value={noteMessage}
+                onChange={(e) => setNoteMessage(e.target.value)}
+                rows={4}
+                size="lg"
+              />
 
-              <Textarea placeholder="Información del paciente (opcional)" value={patientInfo} onChange={(e) => setPatientInfo(e.target.value)} rows={2} />
+              <Textarea
+                placeholder="Información adicional del paciente (opcional)"
+                value={patientInfo}
+                onChange={(e) => setPatientInfo(e.target.value)}
+                rows={2}
+                size="lg"
+              />
             </VStack>
           </ModalBody>
           <ModalFooter>
             <Button variant="ghost" mr={3} onClick={onNoteClose}>
               Cancelar
             </Button>
-            <Button colorScheme="blue" onClick={sendNoteToDriver} disabled={!wsConnected}>
-              📤 Enviar Nota
+            <Button 
+              colorScheme="blue" 
+              onClick={sendNoteToAmbulance}
+              isDisabled={!noteMessage.trim()}
+            >
+              📤 Enviar Mensaje
             </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
 
-      {/* Modal: notificación paciente */}
+      {/* Notification Modal */}
       <Modal isOpen={isNotificationOpen} onClose={onNotificationClose} size="lg">
         <ModalOverlay />
         <ModalContent>
-          <ModalHeader bg="blue.500" color="white">
+          <ModalHeader bg="blue.600" color="white">
             🚨 Notificación de Traslado de Paciente
           </ModalHeader>
-          <ModalBody>
+          <ModalBody py={4}>
             {selectedNotification && (
               <VStack spacing={4} align="stretch">
-                <Alert status="info">
+                <Alert status="info" borderRadius="md">
                   <AlertIcon />
                   <Box>
-                    <AlertTitle>Ambulancia en camino!</AlertTitle>
+                    <AlertTitle>Ambulancia en Camino!</AlertTitle>
                     <AlertDescription>
-                      {selectedNotification.ambulanceInfo?.id} - {selectedNotification.ambulanceInfo?.placa}
+                      {selectedNotification.ambulanceId} - {selectedNotification.ambulanceInfo?.placa || 'N/A'}
                     </AlertDescription>
                   </Box>
                 </Alert>
 
-                <Grid templateColumns="1fr 1fr" gap={4}>
-                  <GridItem>
-                    <Text fontWeight="bold" mb={2}>
-                      Información del Paciente:
-                    </Text>
+                <HStack spacing={4} align="start">
+                  <Box flex={1}>
+                    <Text fontWeight="bold" mb={2}>Información del Paciente:</Text>
                     <VStack align="start" spacing={1}>
-                      <Text>
-                        <strong>Edad:</strong> {selectedNotification.patientInfo?.age || "No especificada"}
-                      </Text>
-                      <Text>
-                        <strong>Sexo:</strong> {selectedNotification.patientInfo?.sex || "No especificado"}
-                      </Text>
-                      <Text>
-                        <strong>Emergencia:</strong> {selectedNotification.patientInfo?.type || "No especificada"}
-                      </Text>
-                      {selectedNotification.patientInfo?.timestamp && <Text fontSize="sm" color="gray.600">Reportado: {selectedNotification.patientInfo.timestamp}</Text>}
+                      <Text fontSize="sm"><strong>Edad:</strong> {selectedNotification.patientInfo?.age || 'No especificada'}</Text>
+                      <Text fontSize="sm"><strong>Sexo:</strong> {selectedNotification.patientInfo?.sex || 'No especificado'}</Text>
+                      <Text fontSize="sm"><strong>Emergencia:</strong> {selectedNotification.patientInfo?.type || 'No especificada'}</Text>
+                      {selectedNotification.patientInfo?.timestamp && (
+                        <Text fontSize="xs" color="gray.600">
+                          Reportado: {selectedNotification.patientInfo.timestamp}
+                        </Text>
+                      )}
                     </VStack>
-                  </GridItem>
+                  </Box>
 
-                  <GridItem>
-                    <Text fontWeight="bold" mb={2}>
-                      Información del Traslado:
-                    </Text>
+                  <Box flex={1}>
+                    <Text fontWeight="bold" mb={2}>Información del Traslado:</Text>
                     <VStack align="start" spacing={1}>
-                      <Text>
-                        <strong>ETA:</strong> {selectedNotification.eta || "Calculando..."}
-                      </Text>
-                      <Text>
-                        <strong>Distancia:</strong> {selectedNotification.distance || "Calculando..."}
-                      </Text>
-                      <Text>
-                        <strong>Ambulancia:</strong> {selectedNotification.ambulanceInfo?.placa || "N/A"}
-                      </Text>
-                      <Text>
-                        <strong>Tipo:</strong> {selectedNotification.ambulanceInfo?.tipo || "N/A"}
-                      </Text>
+                      <Text fontSize="sm"><strong>ETA:</strong> {selectedNotification.eta || 'Calculando...'}</Text>
+                      <Text fontSize="sm"><strong>Distancia:</strong> {selectedNotification.distance || 'Calculando...'}</Text>
+                      <Text fontSize="sm"><strong>Ambulancia:</strong> {selectedNotification.ambulanceInfo?.placa || 'N/A'}</Text>
+                      <Text fontSize="sm"><strong>Tipo:</strong> {selectedNotification.ambulanceInfo?.tipo || 'N/A'}</Text>
                     </VStack>
-                  </GridItem>
-                </Grid>
+                  </Box>
+                </HStack>
 
                 <Box bg="blue.50" p={3} borderRadius="md" borderLeft="4px" borderColor="blue.500">
                   <Text fontSize="sm" fontWeight="bold" color="blue.700">
                     Tiempo estimado de llegada:
                   </Text>
                   <Text fontSize="lg" fontWeight="bold" color="blue.800">
-                    {selectedNotification.eta || "Calculando..."} minutos
+                    {selectedNotification.eta || 'Calculando...'} minutos
                   </Text>
                   <Text fontSize="sm" color="blue.600">
-                    Distancia: {selectedNotification.distance || "Calculando..."} km
+                    Distancia: {selectedNotification.distance || 'Calculando...'} km
                   </Text>
-                  <Button size="sm" colorScheme="blue" mt={2} onClick={() => selectedNotification.routeGeometry && fitMapToRoute(selectedNotification.routeGeometry)}>
-                    🗺️ Ver ruta en el mapa
+                  <Button 
+                    size="sm" 
+                    colorScheme="blue" 
+                    mt={2}
+                    onClick={() => {
+                      if (selectedNotification.routeGeometry) {
+                        const bounds = new mapboxgl.LngLatBounds();
+                        selectedNotification.routeGeometry.forEach(coord => {
+                          bounds.extend([coord[0], coord[1]]);
+                        });
+                        if (hospitalInfo) {
+                          bounds.extend([hospitalInfo.lng, hospitalInfo.lat]);
+                        }
+                        map.current.fitBounds(bounds, { padding: 80, duration: 1000 });
+                      }
+                    }}
+                  >
+                    🗺️ Ver Ruta en el Mapa
                   </Button>
                 </Box>
               </VStack>
             )}
           </ModalBody>
           <ModalFooter>
-            <Button colorScheme="red" variant="outline" mr={3} onClick={() => rejectPatient(selectedNotification)} disabled={!wsConnected}>
+            <Button colorScheme="red" variant="outline" mr={3} onClick={() => rejectPatient(selectedNotification)}>
               Rechazar Paciente
             </Button>
-            <Button colorScheme="green" onClick={() => acceptPatient(selectedNotification)} disabled={!wsConnected}>
+            <Button colorScheme="green" onClick={() => acceptPatient(selectedNotification)}>
               ✅ Aceptar Paciente
             </Button>
           </ModalFooter>
@@ -968,5 +1311,3 @@ function MapaHospital() {
     </ChakraProvider>
   );
 }
-
-export default MapaHospital;
