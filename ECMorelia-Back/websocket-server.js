@@ -85,15 +85,19 @@ async function geocodeAddressMorelia(address) {
   }
 }
 
-// ---------- SEARCH ADDRESSES (Para autocompletado) ----------
+// ---------- SEARCH ADDRESSES MEJORADO (Para autocompletado real) ----------
 async function searchAddressesMorelia(query) {
   if (!query || query.trim().length < 3) {
     return [];
   }
 
   try {
-    const q = encodeURIComponent(query.trim() + ', Morelia');
-    const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${q}.json?access_token=${MAPBOX_TOKEN}&country=mx&limit=8&types=address,poi&bbox=-101.2676,19.6410,-101.1262,19.7638`;
+    const q = encodeURIComponent(query.trim());
+    
+    // URL mejorada para buscar direcciones específicas en Morelia
+    const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${q}.json?access_token=${MAPBOX_TOKEN}&country=mx&limit=10&types=address,poi,place&bbox=-101.2676,19.6410,-101.1262,19.7638&language=es`;
+    
+    console.log(`🔍 Buscando direcciones: ${query}`);
     
     const response = await fetch(url);
     if (!response.ok) return [];
@@ -102,15 +106,34 @@ async function searchAddressesMorelia(query) {
     
     if (!data.features || data.features.length === 0) return [];
     
-    return data.features.map(feature => ({
-      id: feature.id,
-      place_name: feature.place_name,
-      lat: feature.center[1],
-      lng: feature.center[0],
-      type: feature.place_type[0],
-      address: feature.properties?.address || '',
-      relevance: feature.relevance
-    }));
+    // Filtrar y priorizar resultados relevantes
+    const filteredResults = data.features
+      .filter(feature => {
+        // Priorizar direcciones exactas y lugares en Morelia
+        const isAddress = feature.place_type.includes('address');
+        const isPOI = feature.place_type.includes('poi');
+        const isPlace = feature.place_type.includes('place');
+        const hasHighRelevance = feature.relevance > 0.5;
+        const isInMorelia = feature.place_name.toLowerCase().includes('morelia') || 
+                           feature.context?.some(ctx => ctx.text.toLowerCase().includes('morelia'));
+        
+        return (isAddress || isPOI || isPlace) && (hasHighRelevance || isInMorelia);
+      })
+      .map(feature => ({
+        id: feature.id,
+        place_name: feature.place_name,
+        lat: feature.center[1],
+        lng: feature.center[0],
+        type: feature.place_type[0],
+        address: feature.properties?.address || '',
+        relevance: feature.relevance,
+        // Información adicional de contexto
+        context: feature.context?.map(ctx => ctx.text).join(', ') || ''
+      }))
+      .sort((a, b) => b.relevance - a.relevance); // Ordenar por relevancia
+
+    console.log(`✅ ${filteredResults.length} resultados encontrados para: ${query}`);
+    return filteredResults;
     
   } catch (error) {
     console.error('Error en búsqueda de direcciones:', error);
@@ -162,6 +185,97 @@ async function getDirectionsWithTraffic(startLng, startLat, endLng, endLat) {
     console.error('💥 Error calculando ruta:', error);
     return null;
   }
+}
+
+// ---------- FUNCIÓN PARA ENVÍO AUTOMÁTICO A SIGUIENTE HOSPITAL ----------
+async function sendToNextAvailableHospital(ambulanceId, patientInfo, ambulanceLocation, originalHospitalId) {
+  const hospitalsList = Array.from(activeHospitals.values())
+    .filter(hospital => 
+      hospital.info.id !== originalHospitalId && 
+      hospital.ws && 
+      hospital.ws.readyState === WebSocket.OPEN
+    )
+    .sort((a, b) => {
+      // Ordenar por distancia (más cercano primero)
+      const distA = calculateDistance(
+        ambulanceLocation.lat, ambulanceLocation.lng,
+        a.info.lat, a.info.lng
+      );
+      const distB = calculateDistance(
+        ambulanceLocation.lat, ambulanceLocation.lng,
+        b.info.lat, b.info.lng
+      );
+      return distA - distB;
+    });
+
+  if (hospitalsList.length === 0) {
+    console.log('❌ No hay hospitales disponibles para envío automático');
+    return null;
+  }
+
+  const nextHospital = hospitalsList[0];
+  console.log(`🔄 Enviando automáticamente a hospital: ${nextHospital.info.nombre}`);
+
+  // Calcular ruta al siguiente hospital
+  const route = await getDirectionsWithTraffic(
+    ambulanceLocation.lng,
+    ambulanceLocation.lat,
+    nextHospital.info.lng,
+    nextHospital.info.lat
+  );
+
+  const notificationId = `auto_${Date.now()}`;
+  
+  const payload = {
+    type: 'patient_transfer_notification',
+    notificationId: notificationId,
+    ambulanceId: ambulanceId,
+    hospitalId: nextHospital.info.id,
+    patientInfo: patientInfo,
+    ambulanceLocation: ambulanceLocation,
+    eta: route ? Math.round(route.duration / 60) : null,
+    distance: route ? (route.distance / 1000).toFixed(1) : null,
+    routeGeometry: route ? route.geometry : null,
+    rawDistance: route ? route.distance : null,
+    rawDuration: route ? route.duration : null,
+    timestamp: new Date().toISOString(),
+    status: 'pending',
+    isAutomatic: true // Marcar como envío automático
+  };
+
+  pendingNotifications.set(notificationId, payload);
+
+  // Enviar notificación al siguiente hospital
+  if (nextHospital.ws && nextHospital.ws.readyState === WebSocket.OPEN) {
+    sendMessage(nextHospital.ws, payload);
+    console.log(`📩 Notificación automática enviada a hospital ${nextHospital.info.id}`);
+  }
+
+  // Notificar a la ambulancia sobre el envío automático
+  const ambulance = activeAmbulances.get(ambulanceId);
+  if (ambulance && ambulance.ws) {
+    sendMessage(ambulance.ws, {
+      type: 'automatic_redirect',
+      originalHospitalId: originalHospitalId,
+      newHospitalId: nextHospital.info.id,
+      hospitalInfo: nextHospital.info,
+      message: `Solicitud enviada automáticamente a ${nextHospital.info.nombre}`
+    });
+  }
+
+  return nextHospital.info.id;
+}
+
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radio de la Tierra en km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
 }
 
 // ---------- FUNCIONES DE BROADCAST MEJORADAS ----------
@@ -520,6 +634,7 @@ function handleLocationUpdate(data) {
     ambulance.status = data.status || ambulance.status;
     ambulance.lastUpdate = new Date();
 
+    // Broadcast de ubicación a todos los hospitales
     broadcastToHospitals({
       type: 'location_update',
       ambulanceId: ambulanceId,
@@ -529,6 +644,8 @@ function handleLocationUpdate(data) {
       status: ambulance.status,
       timestamp: new Date().toISOString()
     });
+
+    console.log(`📍 Ubicación actualizada: ${ambulanceId} - ${ambulance.speed} km/h`);
   }
 }
 
@@ -570,6 +687,18 @@ async function handlePatientTransferNotification(data) {
           duration: route.duration,
           updatedAt: Date.now()
         });
+
+        // Enviar actualización de ruta al hospital
+        const hospitalWs = activeHospitals.get(data.hospitalId)?.ws;
+        if (hospitalWs && hospitalWs.readyState === WebSocket.OPEN) {
+          sendMessage(hospitalWs, {
+            type: 'route_update',
+            ambulanceId: data.ambulanceId,
+            routeGeometry: route.geometry,
+            distance: route.distance,
+            duration: route.duration
+          });
+        }
       }
     }
   }
@@ -583,6 +712,8 @@ async function handlePatientTransferNotification(data) {
         ...payload
       });
       console.log(`📩 Notificación enviada a hospital ${data.hospitalId}`);
+    } else {
+      console.log(`❌ Hospital ${data.hospitalId} no encontrado o desconectado`);
     }
   }
 
@@ -633,7 +764,7 @@ function handleHospitalRejectPatient(data) {
       notificationId: data.notificationId,
       hospitalId: data.hospitalId,
       reason: data.reason || 'No especificado',
-      message: 'Hospital no puede aceptar al paciente. Busque otro hospital.',
+      message: 'Hospital no puede aceptar al paciente. Buscando otro hospital...',
       timestamp: new Date().toISOString()
     });
     
@@ -641,6 +772,22 @@ function handleHospitalRejectPatient(data) {
     ambulance.status = 'disponible';
     activeRoutes.delete(notification.ambulanceId);
     console.log(`❌ Paciente rechazado por hospital ${data.hospitalId}`);
+  }
+
+  // Intentar enviar automáticamente al siguiente hospital
+  if (notification.ambulanceLocation && notification.patientInfo) {
+    setTimeout(async () => {
+      const nextHospitalId = await sendToNextAvailableHospital(
+        notification.ambulanceId,
+        notification.patientInfo,
+        notification.ambulanceLocation,
+        data.hospitalId
+      );
+      
+      if (nextHospitalId) {
+        console.log(`✅ Solicitud enviada automáticamente a hospital ${nextHospitalId}`);
+      }
+    }, 1000);
   }
 
   pendingNotifications.delete(data.notificationId);
@@ -753,10 +900,12 @@ function sendMessage(ws, message) {
   try {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(message));
+      return true;
     }
   } catch (error) {
     console.error('Error enviando mensaje:', error);
   }
+  return false;
 }
 
 function sendError(ws, message) {
@@ -786,6 +935,29 @@ function cleanupDisconnectedClient(ws) {
   }
 }
 
+// ---------- CLEANUP DE CONEXIONES INACTIVAS ----------
+setInterval(() => {
+  const now = Date.now();
+  const timeout = 5 * 60 * 1000; // 5 minutos
+
+  // Limpiar ambulancias inactivas
+  activeAmbulances.forEach((ambulance, id) => {
+    if (ambulance.lastUpdate && (now - ambulance.lastUpdate.getTime()) > timeout) {
+      console.log(`🕒 Limpiando ambulancia inactiva: ${id}`);
+      activeAmbulances.delete(id);
+      activeRoutes.delete(id);
+    }
+  });
+
+  // Limpiar notificaciones antiguas
+  pendingNotifications.forEach((notification, id) => {
+    if (notification.timestamp && (now - new Date(notification.timestamp).getTime()) > timeout) {
+      console.log(`🕒 Limpiando notificación antigua: ${id}`);
+      pendingNotifications.delete(id);
+    }
+  });
+}, 60000); // Ejecutar cada minuto
+
 // Heartbeat mejorado
 setInterval(() => {
   wss.clients.forEach((ws) => {
@@ -805,6 +977,7 @@ server.listen(PORT, () => {
   console.log(`🏥 Health check: http://localhost:${PORT}/health`);
   console.log(`🗺️  Geocoding API: http://localhost:${PORT}/geocode`);
   console.log(`🔍 Search API: http://localhost:${PORT}/search-addresses`);
+  console.log(`🛣️  Directions API: http://localhost:${PORT}/directions`);
 });
 
 module.exports = { wss, activeAmbulances, activeHospitals };

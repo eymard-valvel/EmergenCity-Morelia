@@ -28,10 +28,36 @@ import {
   Progress,
   Input,
   Select,
-  Spinner
+  Spinner,
+  useColorMode,
+  useColorModeValue,
+  IconButton,
+  extendTheme
 } from "@chakra-ui/react";
+import { MoonIcon, SunIcon } from "@chakra-ui/icons";
+
+// Configuración del tema claro/oscuro
+const config = {
+  initialColorMode: 'light',
+  useSystemColorMode: false,
+};
+
+const theme = extendTheme({ config });
 
 mapboxgl.accessToken = 'pk.eyJ1IjoiZWR1YXJkbzI1MGplbW0iLCJhIjoiY2xwYzVvdzc3MDNlYjJoazUzbzZsYjRwNiJ9.KsDXLdjWn2R4fMX-YIIU8g';
+
+function ColorModeToggle() {
+  const { colorMode, toggleColorMode } = useColorMode();
+  return (
+    <IconButton
+      aria-label="Toggle color mode"
+      icon={colorMode === 'light' ? <MoonIcon /> : <SunIcon />}
+      onClick={toggleColorMode}
+      variant="ghost"
+      size="sm"
+    />
+  );
+}
 
 export default function MapaHospitalOptimizado() {
   // Refs
@@ -66,6 +92,14 @@ export default function MapaHospitalOptimizado() {
   const [patientInfo, setPatientInfo] = useState("");
 
   const toast = useToast();
+  const { colorMode } = useColorMode();
+
+  // Colores dinámicos según el tema
+  const bgColor = useColorModeValue('gray.50', 'gray.900');
+  const cardBg = useColorModeValue('white', 'gray.800');
+  const borderColor = useColorModeValue('gray.200', 'gray.600');
+  const textColor = useColorModeValue('gray.800', 'white');
+  const headerBg = useColorModeValue('white', 'gray.800');
 
   // ---------- WEBSOCKET CONNECTION MEJORADA ----------
   const connectWebSocket = useCallback(() => {
@@ -133,7 +167,10 @@ export default function MapaHospitalOptimizado() {
                   ambulanceId: data.ambulanceId,
                   geometry: data.routeGeometry,
                   distance: data.distance,
-                  duration: data.duration
+                  duration: data.duration,
+                  // Formato mejorado para display
+                  formattedDistance: data.distance ? `${(data.distance / 1000).toFixed(1)} km` : 'Calculando...',
+                  formattedDuration: data.duration ? `${Math.round(data.duration / 60)} min` : 'Calculando...'
                 });
               }
               break;
@@ -184,7 +221,7 @@ export default function MapaHospitalOptimizado() {
           showToast('warning', 'Conexión Perdida', 'Reconectando automáticamente...');
           reconnectTimeout.current = setTimeout(() => {
             connectWebSocket();
-          }, 5000); // Aumentado a 5 segundos
+          }, 5000);
         } else if (connectionAttempts.current >= maxConnectionAttempts) {
           showToast('error', 'Error de Conexión', 'No se pudo conectar después de varios intentos');
         }
@@ -205,13 +242,12 @@ export default function MapaHospitalOptimizado() {
     }
   }, [hospitalInfo, isConnecting]);
 
-  // ---------- HOSPITAL REGISTRATION CON GEOCODING MEJORADO ----------
+  // ---------- HOSPITAL REGISTRATION ----------
   const registerHospital = useCallback(() => {
     if (!hospitalInfo || !ws.current || ws.current.readyState !== WebSocket.OPEN) {
       return;
     }
 
-    // Solo registrar si tenemos coordenadas válidas
     if (hospitalInfo.lat && hospitalInfo.lng) {
       ws.current.send(JSON.stringify({
         type: 'register_hospital',
@@ -224,7 +260,7 @@ export default function MapaHospitalOptimizado() {
     }
   }, [hospitalInfo]);
 
-  // ---------- HOSPITAL DATA LOADING MEJORADO ----------
+  // ---------- HOSPITAL DATA LOADING ----------
   useEffect(() => {
     isMounted.current = true;
 
@@ -248,7 +284,6 @@ export default function MapaHospitalOptimizado() {
           telefono: stored.telefono || ''
         };
 
-        // Solo forzar geocoding si no tenemos coordenadas válidas
         if (hospitalData.direccion && (!hospitalData.lat || !hospitalData.lng)) {
           showToast('info', 'Verificando Ubicación', 'Validando coordenadas del hospital...');
           
@@ -256,7 +291,6 @@ export default function MapaHospitalOptimizado() {
           hospitalData.lat = verifiedCoords.lat;
           hospitalData.lng = verifiedCoords.lng;
 
-          // Actualizar localStorage con coordenadas corregidas
           localStorage.setItem("hospitalInfo", JSON.stringify({
             ...stored,
             lat: verifiedCoords.lat,
@@ -282,7 +316,7 @@ export default function MapaHospitalOptimizado() {
     };
   }, []);
 
-  // ---------- GEOCODING MEJORADO ----------
+  // ---------- GEOCODING ----------
   const geocodeHospitalAddress = async (address) => {
     if (!address) {
       return { lat: 19.7024, lng: -101.1969 };
@@ -315,9 +349,13 @@ export default function MapaHospitalOptimizado() {
   useEffect(() => {
     if (!hospitalInfo || !mapContainer.current) return;
 
+    const mapStyle = colorMode === 'light' 
+      ? 'mapbox://styles/mapbox/light-v11'
+      : 'mapbox://styles/mapbox/dark-v11';
+
     const mapInstance = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/light-v11',
+      style: mapStyle,
       center: [hospitalInfo.lng, hospitalInfo.lat],
       zoom: 15,
       pitch: 45
@@ -329,10 +367,8 @@ export default function MapaHospitalOptimizado() {
       console.log('🗺️ Mapa del hospital cargado');
       map.current = mapInstance;
       
-      // Colocar marcador del hospital
       placeHospitalMarker();
       
-      // Agregar capas
       if (trafficEnabled) {
         addTrafficLayer();
       }
@@ -347,19 +383,18 @@ export default function MapaHospitalOptimizado() {
         if (mapInstance) mapInstance.remove(); 
       } catch (e) {}
     };
-  }, [hospitalInfo]);
+  }, [hospitalInfo, colorMode]);
 
-  // ---------- WEBSOCKET LIFECYCLE ----------
+  // ---------- WEBSOCKET LIFECYCLE CORREGIDO ----------
   useEffect(() => {
     if (hospitalInfo) {
-      // Esperar un poco antes de conectar para evitar bucles
       const timeoutId = setTimeout(() => {
         connectWebSocket();
       }, 1000);
 
       return () => clearTimeout(timeoutId);
     }
-  }, [hospitalInfo, connectWebSocket]);
+  }, [hospitalInfo]); // Eliminada dependencia problemática
 
   // Cleanup effect
   useEffect(() => {
@@ -426,7 +461,7 @@ export default function MapaHospitalOptimizado() {
           type: 'fill-extrusion',
           minzoom: 15,
           paint: {
-            'fill-extrusion-color': '#BDBDBD',
+            'fill-extrusion-color': colorMode === 'light' ? '#BDBDBD' : '#4A5568',
             'fill-extrusion-height': ['get', 'height'],
             'fill-extrusion-base': ['get', 'min_height'],
             'fill-extrusion-opacity': 0.6
@@ -500,7 +535,6 @@ export default function MapaHospitalOptimizado() {
   const updateAmbulanceMarkers = (ambulancesList) => {
     if (!map.current) return;
 
-    // Limpiar marcadores antiguos
     Object.values(ambulanceMarkers.current).forEach(marker => {
       try { marker.remove(); } catch (e) {}
     });
@@ -551,14 +585,12 @@ export default function MapaHospitalOptimizado() {
       });
     });
 
-    // Función global para selección desde popup
     window.selectAmbulanceFromMap = (ambulanceId) => {
       const ambulance = ambulancesList.find(a => a.id === ambulanceId);
       if (ambulance) {
         setSelectedAmbulance(ambulance);
         showToast('info', 'Ambulancia Seleccionada', ambulance.id);
         
-        // Centrar en la ambulancia
         if (ambulance.location) {
           map.current.flyTo({
             center: [ambulance.location.lng, ambulance.location.lat],
@@ -575,10 +607,8 @@ export default function MapaHospitalOptimizado() {
 
     const marker = ambulanceMarkers.current[data.ambulanceId];
     if (marker) {
-      // Actualizar posición del marcador
       marker.setLngLat([data.location.lng, data.location.lat]);
       
-      // Actualizar estado local
       setAmbulances(prev => prev.map(amb => 
         amb.id === data.ambulanceId 
           ? { ...amb, location: data.location, speed: data.speed, heading: data.heading }
@@ -599,11 +629,10 @@ export default function MapaHospitalOptimizado() {
     ambulanceMarkers.current = {};
   };
 
-  // ---------- ROUTE MANAGEMENT ----------
+  // ---------- ROUTE MANAGEMENT MEJORADO ----------
   const drawRouteOnMap = (routeGeometry, routeId = 'hospital-route') => {
     if (!map.current || !routeGeometry) return;
 
-    // Limpiar ruta anterior
     clearRoute();
 
     try {
@@ -619,7 +648,6 @@ export default function MapaHospitalOptimizado() {
         }
       });
 
-      // Capa principal de ruta
       map.current.addLayer({
         id: routeId,
         type: 'line',
@@ -635,7 +663,6 @@ export default function MapaHospitalOptimizado() {
         }
       });
 
-      // Efecto glow
       map.current.addLayer({
         id: routeId + '-glow',
         type: 'line',
@@ -654,7 +681,6 @@ export default function MapaHospitalOptimizado() {
 
       routeLayerIds.current = [routeId, routeId + '-glow'];
 
-      // Ajustar vista para mostrar la ruta completa
       const bounds = new mapboxgl.LngLatBounds();
       routeGeometry.forEach(coord => {
         bounds.extend([coord[0], coord[1]]);
@@ -689,49 +715,6 @@ export default function MapaHospitalOptimizado() {
     setActiveRoute(null);
   };
 
-  const calculateRouteToAmbulance = async (ambulance) => {
-    if (!ambulance || !ambulance.location || !hospitalInfo) {
-      showToast('warning', 'Datos Incompletos', 'No se puede calcular la ruta');
-      return;
-    }
-
-    try {
-      const response = await fetch('http://localhost:3002/directions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          startLng: ambulance.location.lng,
-          startLat: ambulance.location.lat,
-          endLng: hospitalInfo.lng,
-          endLat: hospitalInfo.lat
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Error calculando ruta');
-      }
-
-      const routeData = await response.json();
-      
-      drawRouteOnMap(routeData.geometry);
-      setActiveRoute({
-        ambulanceId: ambulance.id,
-        geometry: routeData.geometry,
-        distance: routeData.distance,
-        duration: routeData.duration
-      });
-
-      showToast('success', 'Ruta Calculada', 
-        `${(routeData.distance / 1000).toFixed(1)} km, ${Math.round(routeData.duration / 60)} min`);
-
-    } catch (error) {
-      console.error('❌ Error calculando ruta:', error);
-      showToast('error', 'Error de Ruta', 'No se pudo calcular la ruta');
-    }
-  };
-
   // ---------- NOTIFICATION HANDLING MEJORADO ----------
   const handlePatientTransferNotification = (data) => {
     console.log('🚨 Notificación de traslado recibida:', data);
@@ -740,20 +723,26 @@ export default function MapaHospitalOptimizado() {
       ...data,
       id: data.notificationId || `notif_${Date.now()}`,
       timestamp: new Date().toLocaleString(),
-      status: 'pending'
+      status: 'pending',
+      // Formato mejorado para display - usar los datos que vienen del operador
+      formattedDistance: data.distance ? `${data.distance} km` : 'Calculando...',
+      formattedDuration: data.eta ? `${data.eta} min` : 'Calculando...',
+      rawDistance: data.rawDistance,
+      rawDuration: data.rawDuration
     };
 
     setPatientNotifications(prev => [...prev, notification]);
     setSelectedNotification(notification);
 
-    // Mostrar ruta si está disponible
     if (data.routeGeometry) {
       drawRouteOnMap(data.routeGeometry);
       setActiveRoute({
         ambulanceId: data.ambulanceId,
         geometry: data.routeGeometry,
-        distance: data.distance,
-        duration: data.duration
+        distance: data.rawDistance || data.distance,
+        duration: data.rawDuration || data.eta * 60,
+        formattedDistance: data.distance ? `${data.distance} km` : 'Calculando...',
+        formattedDuration: data.eta ? `${data.eta} min` : 'Calculando...'
       });
     }
 
@@ -777,7 +766,6 @@ export default function MapaHospitalOptimizado() {
       return;
     }
 
-    // Enviar aceptación
     ws.current.send(JSON.stringify({
       type: 'hospital_accept_patient',
       notificationId: notification.notificationId,
@@ -799,7 +787,6 @@ export default function MapaHospitalOptimizado() {
       return;
     }
 
-    // Enviar rechazo
     ws.current.send(JSON.stringify({
       type: 'hospital_reject_patient',
       notificationId: notification.notificationId,
@@ -892,10 +879,10 @@ export default function MapaHospitalOptimizado() {
   // ---------- RENDER ----------
   if (!hospitalInfo) {
     return (
-      <ChakraProvider>
-        <Box height="100vh" display="flex" alignItems="center" justifyContent="center" bg="gray.50">
+      <ChakraProvider theme={theme}>
+        <Box height="100vh" display="flex" alignItems="center" justifyContent="center" bg={bgColor}>
           <VStack spacing={4}>
-            <Text fontSize="2xl" fontWeight="bold" color="gray.800">
+            <Text fontSize="2xl" fontWeight="bold" color={textColor}>
               Configurando Sistema Hospitalario...
             </Text>
             <Progress size="lg" width="300px" isIndeterminate colorScheme="blue" />
@@ -909,16 +896,16 @@ export default function MapaHospitalOptimizado() {
   }
 
   return (
-    <ChakraProvider>
-      <Box height="100vh" display="flex" flexDirection="column" bg="gray.50">
+    <ChakraProvider theme={theme}>
+      <Box height="100vh" display="flex" flexDirection="column" bg={bgColor}>
         {/* Header */}
-        <Box bg="white" p={4} boxShadow="sm" borderBottom="1px" borderColor="gray.200">
+        <Box bg={headerBg} p={4} boxShadow="sm" borderBottom="1px" borderColor={borderColor}>
           <HStack justifyContent="space-between">
             <VStack align="start" spacing={0}>
-              <Text fontSize="xl" fontWeight="bold" color="gray.800">
+              <Text fontSize="xl" fontWeight="bold" color={textColor}>
                 🏥 {hospitalInfo.nombre}
               </Text>
-              <Text fontSize="sm" color="gray.600">
+              <Text fontSize="sm" color={textColor}>
                 Centro de Control Hospitalario - Monitoreo de Emergencias
                 <Badge ml={2} colorScheme={wsConnected ? "green" : isConnecting ? "yellow" : "red"} fontSize="xs">
                   {wsConnected ? "SISTEMA CONECTADO" : isConnecting ? "CONECTANDO..." : "SIN CONEXIÓN"}
@@ -939,13 +926,15 @@ export default function MapaHospitalOptimizado() {
 
               {activeRoute && (
                 <Badge colorScheme="purple" fontSize="md" p={2} borderRadius="md">
-                  🕐 {Math.round(activeRoute.duration / 60)} min • 📏 {(activeRoute.distance / 1000).toFixed(1)} km
+                  🕐 {activeRoute.formattedDuration} • 📏 {activeRoute.formattedDistance}
                 </Badge>
               )}
 
               <Button size="sm" colorScheme={wsConnected ? "green" : isConnecting ? "yellow" : "orange"} onClick={reconnect} isDisabled={isConnecting}>
                 {isConnecting ? <Spinner size="sm" /> : wsConnected ? "✅ CONECTADO" : "🔌 RECONECTAR"}
               </Button>
+              
+              <ColorModeToggle />
             </HStack>
           </HStack>
         </Box>
@@ -953,7 +942,7 @@ export default function MapaHospitalOptimizado() {
         {/* Main Content */}
         <Box flex={1} display="flex">
           {/* Side Panel */}
-          <Box width="480px" bg="white" p={4} overflowY="auto" boxShadow="md" borderRight="1px" borderColor="gray.200">
+          <Box width="480px" bg={cardBg} p={4} overflowY="auto" boxShadow="md" borderRight="1px" borderColor={borderColor}>
             <VStack spacing={6} align="stretch">
               {/* Hospital Info */}
               <Card bg="blue.50" border="1px" borderColor="blue.200">
@@ -971,8 +960,8 @@ export default function MapaHospitalOptimizado() {
               {/* Ambulances List */}
               <Box>
                 <HStack justify="space-between" mb={3}>
-                  <Text fontWeight="bold" color="gray.800">🚑 Ambulancias en Servicio</Text>
-                  <Text fontSize="sm" color="gray.600">
+                  <Text fontWeight="bold" color={textColor}>🚑 Ambulancias en Servicio</Text>
+                  <Text fontSize="sm" color={textColor}>
                     {ambulances.length} conectadas
                   </Text>
                 </HStack>
@@ -986,9 +975,9 @@ export default function MapaHospitalOptimizado() {
                     {ambulances.map(ambulance => (
                       <Card 
                         key={ambulance.id}
-                        bg={selectedAmbulance?.id === ambulance.id ? "blue.50" : "white"}
+                        bg={selectedAmbulance?.id === ambulance.id ? "blue.50" : cardBg}
                         border="1px"
-                        borderColor={selectedAmbulance?.id === ambulance.id ? "blue.200" : "gray.200"}
+                        borderColor={selectedAmbulance?.id === ambulance.id ? "blue.200" : borderColor}
                         cursor="pointer"
                         onClick={() => setSelectedAmbulance(ambulance)}
                         _hover={{ borderColor: "blue.300", transform: 'translateY(-1px)' }}
@@ -1014,7 +1003,7 @@ export default function MapaHospitalOptimizado() {
                             <Box mt={2} p={2} bg="blue.100" borderRadius="md">
                               <Text fontSize="sm" fontWeight="bold" color="blue.800">📊 Ruta Activa</Text>
                               <Text fontSize="xs" color="blue.700">
-                                🕐 {Math.round(activeRoute.duration / 60)} min • 📏 {(activeRoute.distance / 1000).toFixed(1)} km
+                                🕐 {activeRoute.formattedDuration} • 📏 {activeRoute.formattedDistance}
                               </Text>
                             </Box>
                           )}
@@ -1035,16 +1024,6 @@ export default function MapaHospitalOptimizado() {
                               }}
                             >
                               👁️ Seguir
-                            </Button>
-                            <Button 
-                              size="xs" 
-                              colorScheme="teal"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                calculateRouteToAmbulance(ambulance);
-                              }}
-                            >
-                              🛣️ Trazar Ruta
                             </Button>
                             <Button 
                               size="xs" 
@@ -1071,8 +1050,8 @@ export default function MapaHospitalOptimizado() {
                     <Text fontWeight="bold" mb={2} color="purple.800">📊 Ruta Activa</Text>
                     <VStack align="start" spacing={1}>
                       <Text fontSize="sm"><strong>Ambulancia:</strong> {activeRoute.ambulanceId}</Text>
-                      <Text fontSize="sm"><strong>Distancia:</strong> {(activeRoute.distance / 1000).toFixed(1)} km</Text>
-                      <Text fontSize="sm"><strong>Tiempo estimado:</strong> {Math.round(activeRoute.duration / 60)} min</Text>
+                      <Text fontSize="sm"><strong>Distancia:</strong> {activeRoute.formattedDistance}</Text>
+                      <Text fontSize="sm"><strong>Tiempo estimado:</strong> {activeRoute.formattedDuration}</Text>
                     </VStack>
                     <Progress value={70} size="sm" colorScheme="purple" mt={3} borderRadius="full" />
                     <Button 
@@ -1132,20 +1111,20 @@ export default function MapaHospitalOptimizado() {
                 position="absolute"
                 top="20px"
                 left="20px"
-                bg="white"
-                color="gray.800"
+                bg={cardBg}
+                color={textColor}
                 p={4}
                 borderRadius="md"
                 boxShadow="xl"
                 border="1px"
-                borderColor="gray.200"
+                borderColor={borderColor}
                 zIndex="1000"
                 minWidth="320px"
               >
                 <Text fontWeight="bold" mb={2} color="blue.600">📊 Ruta Activa - {activeRoute.ambulanceId}</Text>
                 <VStack align="start" spacing={1}>
-                  <Text fontSize="sm"><strong>🕐 ETA:</strong> {Math.round(activeRoute.duration / 60)} minutos</Text>
-                  <Text fontSize="sm"><strong>📏 Distancia:</strong> {(activeRoute.distance / 1000).toFixed(1)} km</Text>
+                  <Text fontSize="sm"><strong>🕐 ETA:</strong> {activeRoute.formattedDuration}</Text>
+                  <Text fontSize="sm"><strong>📏 Distancia:</strong> {activeRoute.formattedDistance}</Text>
                   <Text fontSize="sm"><strong>🏥 Destino:</strong> {hospitalInfo.nombre}</Text>
                 </VStack>
                 <Progress value={65} size="sm" colorScheme="blue" mt={2} borderRadius="full" />
@@ -1257,8 +1236,8 @@ export default function MapaHospitalOptimizado() {
                   <Box flex={1}>
                     <Text fontWeight="bold" mb={2}>Información del Traslado:</Text>
                     <VStack align="start" spacing={1}>
-                      <Text fontSize="sm"><strong>ETA:</strong> {selectedNotification.eta || 'Calculando...'}</Text>
-                      <Text fontSize="sm"><strong>Distancia:</strong> {selectedNotification.distance || 'Calculando...'}</Text>
+                      <Text fontSize="sm"><strong>ETA:</strong> {selectedNotification.formattedDuration}</Text>
+                      <Text fontSize="sm"><strong>Distancia:</strong> {selectedNotification.formattedDistance}</Text>
                       <Text fontSize="sm"><strong>Ambulancia:</strong> {selectedNotification.ambulanceInfo?.placa || 'N/A'}</Text>
                       <Text fontSize="sm"><strong>Tipo:</strong> {selectedNotification.ambulanceInfo?.tipo || 'N/A'}</Text>
                     </VStack>
@@ -1270,30 +1249,11 @@ export default function MapaHospitalOptimizado() {
                     Tiempo estimado de llegada:
                   </Text>
                   <Text fontSize="lg" fontWeight="bold" color="blue.800">
-                    {selectedNotification.eta || 'Calculando...'} minutos
+                    {selectedNotification.formattedDuration}
                   </Text>
                   <Text fontSize="sm" color="blue.600">
-                    Distancia: {selectedNotification.distance || 'Calculando...'} km
+                    Distancia: {selectedNotification.formattedDistance}
                   </Text>
-                  <Button 
-                    size="sm" 
-                    colorScheme="blue" 
-                    mt={2}
-                    onClick={() => {
-                      if (selectedNotification.routeGeometry) {
-                        const bounds = new mapboxgl.LngLatBounds();
-                        selectedNotification.routeGeometry.forEach(coord => {
-                          bounds.extend([coord[0], coord[1]]);
-                        });
-                        if (hospitalInfo) {
-                          bounds.extend([hospitalInfo.lng, hospitalInfo.lat]);
-                        }
-                        map.current.fitBounds(bounds, { padding: 80, duration: 1000 });
-                      }
-                    }}
-                  >
-                    🗺️ Ver Ruta en el Mapa
-                  </Button>
                 </Box>
               </VStack>
             )}

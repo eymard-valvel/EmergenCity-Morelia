@@ -32,11 +32,39 @@ import {
   IconButton,
   List,
   ListItem,
-  Spinner
+  Spinner,
+  useColorMode,
+  useColorModeValue,
+  extendTheme,
+  Checkbox,
+  RadioGroup,
+  Radio,
+  Stack
 } from '@chakra-ui/react';
-import { SearchIcon, CloseIcon } from '@chakra-ui/icons';
+import { SearchIcon, CloseIcon, MoonIcon, SunIcon } from '@chakra-ui/icons';
+
+// Configuración del tema claro/oscuro
+const config = {
+  initialColorMode: 'light',
+  useSystemColorMode: false,
+};
+
+const theme = extendTheme({ config });
 
 mapboxgl.accessToken = 'pk.eyJ1IjoiZWR1YXJkbzI1MGplbW0iLCJhIjoiY2xwYzVvdzc3MDNlYjJoazUzbzZsYjRwNiJ9.KsDXLdjWn2R4fMX-YIIU8g';
+
+function ColorModeToggle() {
+  const { colorMode, toggleColorMode } = useColorMode();
+  return (
+    <IconButton
+      aria-label="Toggle color mode"
+      icon={colorMode === 'light' ? <MoonIcon /> : <SunIcon />}
+      onClick={toggleColorMode}
+      variant="ghost"
+      size="sm"
+    />
+  );
+}
 
 export default function MapaOperadorOptimizado() {
   // Refs
@@ -51,6 +79,8 @@ export default function MapaOperadorOptimizado() {
   const reconnectTimeout = useRef(null);
   const connectionAttempts = useRef(0);
   const maxConnectionAttempts = 5;
+  const locationUpdateInterval = useRef(null);
+  const isMounted = useRef(true);
 
   // Estado principal
   const [pos, setPos] = useState(null);
@@ -75,12 +105,23 @@ export default function MapaOperadorOptimizado() {
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState(null);
+  const [emergencyStep, setEmergencyStep] = useState('mode'); // 'mode', 'patient', 'location', 'hospital'
+  const [emergencyMode, setEmergencyMode] = useState(''); // 'atender_emergencia', 'trasladar_paciente'
+  const [includePatientInfo, setIncludePatientInfo] = useState(false);
 
   const toast = useToast();
+  const { colorMode } = useColorMode();
 
-  // ---------- WEBSOCKET CONNECTION MEJORADA ----------
+  // Colores dinámicos según el tema
+  const bgColor = useColorModeValue('gray.50', 'gray.900');
+  const cardBg = useColorModeValue('white', 'gray.800');
+  const borderColor = useColorModeValue('gray.200', 'gray.600');
+  const textColor = useColorModeValue('gray.800', 'white');
+  const headerBg = useColorModeValue('white', 'gray.800');
+
+  // ---------- WEBSOCKET CONNECTION MEJORADA Y CORREGIDA ----------
   const connectWebSocket = useCallback(() => {
-    if (isConnecting || connectionAttempts.current >= maxConnectionAttempts) {
+    if (!isMounted.current || isConnecting || connectionAttempts.current >= maxConnectionAttempts) {
       return;
     }
 
@@ -96,6 +137,8 @@ export default function MapaOperadorOptimizado() {
       ws.current = new WebSocket('ws://localhost:3002/ws');
 
       ws.current.onopen = () => {
+        if (!isMounted.current) return;
+        
         console.log('✅ Operador conectado al servidor WebSocket');
         setWsConnected(true);
         setIsConnecting(false);
@@ -116,6 +159,8 @@ export default function MapaOperadorOptimizado() {
       };
 
       ws.current.onmessage = (event) => {
+        if (!isMounted.current) return;
+        
         try {
           const data = JSON.parse(event.data);
           console.log('📨 Mensaje recibido:', data.type);
@@ -127,8 +172,10 @@ export default function MapaOperadorOptimizado() {
 
             case 'active_hospitals_update':
               console.log('🏥 Hospitales actualizados:', data.hospitals.length);
-              setHospitals(data.hospitals || []);
-              updateHospitalMarkers(data.hospitals || []);
+              // Ordenar hospitales por distancia (más cercano primero)
+              const sortedHospitals = sortHospitalsByDistance(data.hospitals || []);
+              setHospitals(sortedHospitals);
+              updateHospitalMarkers(sortedHospitals);
               break;
 
             case 'hospital_note':
@@ -153,7 +200,16 @@ export default function MapaOperadorOptimizado() {
               });
               setIsNavigating(false);
               clearRoute();
-              setTimeout(() => setHospitalNotification(null), 6000);
+              
+              // Enviar automáticamente al siguiente hospital si hay más disponibles
+              if (hospitals.length > 1) {
+                const nextHospital = hospitals.find(h => h.id !== data.hospitalId && h.connected);
+                if (nextHospital) {
+                  setTimeout(() => {
+                    sendToNextHospital(nextHospital);
+                  }, 2000);
+                }
+              }
               break;
 
             case 'navigation_cancelled':
@@ -164,6 +220,10 @@ export default function MapaOperadorOptimizado() {
 
             case 'notification_sent':
               showToast('success', 'Notificación Enviada', 'Hospital notificado correctamente');
+              break;
+
+            case 'automatic_redirect':
+              showToast('info', 'Redirección Automática', data.message || 'Solicitud enviada a otro hospital');
               break;
 
             case 'error':
@@ -179,6 +239,8 @@ export default function MapaOperadorOptimizado() {
       };
 
       ws.current.onclose = (event) => {
+        if (!isMounted.current) return;
+        
         console.log('🔌 WebSocket cerrado:', event.code, event.reason);
         setWsConnected(false);
         setIsConnecting(false);
@@ -187,13 +249,15 @@ export default function MapaOperadorOptimizado() {
           showToast('warning', 'Conexión Perdida', 'Reconectando automáticamente...');
           reconnectTimeout.current = setTimeout(() => {
             connectWebSocket();
-          }, 5000); // Aumentado a 5 segundos
+          }, 5000);
         } else if (connectionAttempts.current >= maxConnectionAttempts) {
           showToast('error', 'Error de Conexión', 'No se pudo conectar después de varios intentos');
         }
       };
 
       ws.current.onerror = (error) => {
+        if (!isMounted.current) return;
+        
         console.error('❌ Error WebSocket:', error);
         setWsConnected(false);
         setIsConnecting(false);
@@ -204,64 +268,87 @@ export default function MapaOperadorOptimizado() {
       console.error('❌ Error al conectar WebSocket:', error);
       setIsConnecting(false);
     }
-  }, [isConnecting]);
+  }, [isConnecting, hospitals]);
 
-  // ---------- MAP INITIALIZATION ----------
-  useEffect(() => {
-    if (!mapContainer.current) return;
+  // ---------- ORDENAR HOSPITALES POR DISTANCIA ----------
+  const sortHospitalsByDistance = (hospitalsList) => {
+    if (!pos || hospitalsList.length === 0) return hospitalsList;
 
-    const mapInstance = new mapboxgl.Map({
-      container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/navigation-day-v1',
-      center: [-101.1969, 19.7024],
-      zoom: 13,
-      pitch: 45,
-      bearing: 0
-    });
+    return hospitalsList
+      .filter(h => h.connected)
+      .map(hospital => {
+        const distance = calculateDistance(
+          pos.lat, pos.lng,
+          hospital.lat, hospital.lng
+        );
+        return { ...hospital, distance };
+      })
+      .sort((a, b) => a.distance - b.distance);
+  };
 
-    mapInstance.addControl(new mapboxgl.NavigationControl(), 'top-right');
+  const calculateDistance = (lat1, lon1, lat2, lon2) => {
+    const R = 6371; // Radio de la Tierra en km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+      Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  };
 
-    mapInstance.on('load', () => {
-      console.log('🗺️ Mapa GPS cargado correctamente');
-      map.current = mapInstance;
-      
-      // Agregar capa de tráfico
-      if (trafficEnabled) {
-        addTrafficLayer();
-      }
-      
-      // Agregar capa de edificios 3D
-      add3DBuildings();
-    });
-
-    return () => {
-      if (watchId.current) navigator.geolocation.clearWatch(watchId.current);
-      cleanupMarkers();
-      try { mapInstance.remove(); } catch (e) {}
-    };
-  }, []);
-
-  // ---------- WEBSOCKET LIFECYCLE ----------
-  useEffect(() => {
-    connectWebSocket();
-
-    return () => {
-      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-      if (ws.current) {
-        try {
-          ws.current.close(1000, 'Componente desmontado');
-        } catch (e) {}
-      }
-    };
-  }, [connectWebSocket]);
-
-  // ---------- GEOLOCATION TRACKING ----------
-  useEffect(() => {
+  // ---------- ACTUALIZACIÓN CONSTANTE DE UBICACIÓN ----------
+  const startLocationTracking = useCallback(() => {
     if (!navigator.geolocation) {
       showToast('error', 'GPS No Disponible', 'Su dispositivo no soporta geolocalización');
       return;
     }
 
+    // Limpiar intervalo anterior si existe
+    if (locationUpdateInterval.current) {
+      clearInterval(locationUpdateInterval.current);
+    }
+
+    // Configurar geolocalización con alta precisión
+    const geoOptions = {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 10000
+    };
+
+    // Función para actualizar ubicación
+    const updateLocation = () => {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const { latitude, longitude, speed: spd, heading: hdg } = position.coords;
+          const currentSpeed = spd ? Math.round(spd * 3.6) : 0;
+          const currentHeading = hdg || 0;
+
+          setPos({ lat: latitude, lng: longitude });
+          setSpeed(currentSpeed);
+          setHeading(currentHeading);
+
+          updatePositionOnMap({ lat: latitude, lng: longitude }, currentHeading);
+          
+          // Enviar ubicación al servidor
+          sendLocationUpdate({ lat: latitude, lng: longitude }, currentSpeed, currentHeading);
+        },
+        (error) => {
+          console.error('❌ Error GPS:', error);
+          // No mostrar toast para evitar spam
+        },
+        geoOptions
+      );
+    };
+
+    // Actualización inmediata
+    updateLocation();
+
+    // Configurar intervalo para actualizaciones constantes (cada 3 segundos)
+    locationUpdateInterval.current = setInterval(updateLocation, 3000);
+
+    // WatchPosition para actualizaciones más sensibles al movimiento
     watchId.current = navigator.geolocation.watchPosition(
       (position) => {
         const { latitude, longitude, speed: spd, heading: hdg } = position.coords;
@@ -273,13 +360,9 @@ export default function MapaOperadorOptimizado() {
         setHeading(currentHeading);
 
         updatePositionOnMap({ lat: latitude, lng: longitude }, currentHeading);
-        
-        // Enviar ubicación al servidor
-        sendLocationUpdate({ lat: latitude, lng: longitude }, currentSpeed, currentHeading);
       },
       (error) => {
-        console.error('❌ Error GPS:', error);
-        showToast('error', 'Error de GPS', 'No se puede obtener la ubicación actual');
+        console.error('❌ Error GPS watch:', error);
       },
       { 
         enableHighAccuracy: true, 
@@ -287,11 +370,75 @@ export default function MapaOperadorOptimizado() {
         timeout: 10000 
       }
     );
+  }, []);
+
+  // ---------- MAP INITIALIZATION CON VISTA MEJORADA ----------
+  useEffect(() => {
+    if (!mapContainer.current) return;
+
+    const mapStyle = colorMode === 'light' 
+      ? 'mapbox://styles/mapbox/navigation-day-v1'
+      : 'mapbox://styles/mapbox/navigation-night-v1';
+
+    const mapInstance = new mapboxgl.Map({
+      container: mapContainer.current,
+      style: mapStyle,
+      center: [-101.1969, 19.7024],
+      zoom: 15,
+      pitch: 60, // Mayor inclinación para vista 3D
+      bearing: 0,
+      antialias: true // Mejor calidad gráfica
+    });
+
+    mapInstance.addControl(new mapboxgl.NavigationControl(), 'top-right');
+    mapInstance.addControl(new mapboxgl.GeolocateControl({
+      positionOptions: {
+        enableHighAccuracy: true
+      },
+      trackUserLocation: true,
+      showUserLocation: true,
+      showAccuracyCircle: false
+    }), 'top-right');
+
+    mapInstance.on('load', () => {
+      console.log('🗺️ Mapa GPS cargado correctamente');
+      map.current = mapInstance;
+      
+      // Iniciar tracking de ubicación
+      startLocationTracking();
+      
+      // Agregar capa de tráfico
+      if (trafficEnabled) {
+        addTrafficLayer();
+      }
+      
+      // Agregar capa de edificios 3D mejorada
+      add3DBuildings();
+    });
 
     return () => {
       if (watchId.current) navigator.geolocation.clearWatch(watchId.current);
+      if (locationUpdateInterval.current) clearInterval(locationUpdateInterval.current);
+      cleanupMarkers();
+      try { mapInstance.remove(); } catch (e) {}
     };
-  }, [isNavigating]);
+  }, [colorMode]);
+
+  // ---------- WEBSOCKET LIFECYCLE CORREGIDO ----------
+  useEffect(() => {
+    isMounted.current = true;
+    connectWebSocket();
+
+    return () => {
+      isMounted.current = false;
+      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
+      if (ws.current) {
+        try {
+          ws.current.close(1000, 'Componente desmontado');
+        } catch (e) {}
+      }
+    };
+  }, []); // Eliminada dependencia problemática
 
   // ---------- MAP LAYERS ----------
   const addTrafficLayer = () => {
@@ -343,12 +490,20 @@ export default function MapaOperadorOptimizado() {
           'source-layer': 'building',
           filter: ['==', 'extrude', 'true'],
           type: 'fill-extrusion',
-          minzoom: 15,
+          minzoom: 12, // Mostrar edificios desde zoom más lejano
           paint: {
-            'fill-extrusion-color': '#C0C0C0',
-            'fill-extrusion-height': ['get', 'height'],
-            'fill-extrusion-base': ['get', 'min_height'],
-            'fill-extrusion-opacity': 0.7
+            'fill-extrusion-color': colorMode === 'light' ? '#C0C0C0' : '#4A5568',
+            'fill-extrusion-height': [
+              'interpolate', ['linear'], ['zoom'],
+              15, 0,
+              15.05, ['get', 'height']
+            ],
+            'fill-extrusion-base': [
+              'interpolate', ['linear'], ['zoom'],
+              15, 0,
+              15.05, ['get', 'min_height']
+            ],
+            'fill-extrusion-opacity': 0.8 // Más opaco para mejor visibilidad
           }
         }, labelLayerId);
       }
@@ -382,10 +537,12 @@ export default function MapaOperadorOptimizado() {
       el.className = 'ambulance-marker';
       el.innerHTML = `
         <div style="
-          width: 65px; height: 65px; background: linear-gradient(135deg, #FF4444, #CC0000);
+          width: 70px; height: 70px; background: linear-gradient(135deg, #FF4444, #CC0000);
           border: 4px solid white; border-radius: 50%; display: flex; align-items: center; 
-          justify-content: center; color: white; font-weight: bold; font-size: 28px; 
+          justify-content: center; color: white; font-weight: bold; font-size: 32px; 
           box-shadow: 0 6px 20px rgba(255,0,0,0.4); cursor: pointer;
+          transform: rotate(${heading}deg);
+          transition: transform 0.5s ease;
         ">🚑</div>
       `;
       
@@ -394,22 +551,21 @@ export default function MapaOperadorOptimizado() {
         .addTo(map.current);
     } else {
       marker.current.setLngLat([position.lng, position.lat]);
+      
+      // Actualizar rotación
+      const markerElement = marker.current.getElement();
+      if (markerElement) {
+        markerElement.style.transform = `rotate(${heading}deg)`;
+      }
     }
 
-    // Rotar marcador según heading
-    const markerElement = marker.current.getElement();
-    if (markerElement) {
-      markerElement.style.transform = `rotate(${heading}deg)`;
-      markerElement.style.transition = 'transform 0.5s ease';
-    }
-
-    // Centrar mapa si no está en navegación
-    if (!isNavigating) {
+    // Centrar mapa si no está en navegación (con animación suave)
+    if (!isNavigating && pos) {
       map.current.easeTo({
         center: [position.lng, position.lat],
         bearing: heading,
-        pitch: speed > 40 ? 50 : 60,
-        zoom: speed > 60 ? 14 : 16,
+        pitch: speed > 40 ? 60 : 70, // Más inclinación cuando hay velocidad
+        zoom: speed > 60 ? 15 : 16,
         duration: 1000
       });
     }
@@ -422,18 +578,22 @@ export default function MapaOperadorOptimizado() {
     hospitalMarkers.current.forEach(marker => marker.remove());
     hospitalMarkers.current = [];
 
-    hospitalsList.forEach(hospital => {
+    hospitalsList.forEach((hospital, index) => {
       if (!hospital.lat || !hospital.lng) return;
 
       const el = document.createElement('div');
       el.innerHTML = `
         <div style="
-          width: 48px; height: 48px; background: ${hospital.connected ? '#4CAF50' : '#757575'};
+          width: 50px; height: 50px; background: ${hospital.connected ? '#4CAF50' : '#757575'};
           border: 3px solid white; border-radius: 50%; display: flex; align-items: center;
-          justify-content: center; color: white; font-weight: bold; font-size: 20px;
+          justify-content: center; color: white; font-weight: bold; font-size: 22px;
           box-shadow: 0 4px 12px rgba(0,0,0,0.3); cursor: pointer;
           opacity: ${hospital.connected ? '1' : '0.6'};
-        ">🏥</div>
+          position: relative;
+        ">
+          🏥
+          ${index === 0 ? '<div style="position: absolute; top: -5px; right: -5px; background: #FF9800; color: white; border-radius: 50%; width: 20px; height: 20px; font-size: 10px; display: flex; align-items: center; justify-content: center;">1</div>' : ''}
+        </div>
       `;
 
       const popup = new mapboxgl.Popup({ offset: 25 })
@@ -442,6 +602,7 @@ export default function MapaOperadorOptimizado() {
             <strong style="font-size: 16px; color: #333;">${hospital.nombre}</strong>
             <div style="margin: 8px 0; font-size: 14px; color: #666;">
               <div>📍 ${hospital.direccion || 'Dirección no disponible'}</div>
+              ${hospital.distance ? `<div style="margin-top: 4px;">📏 ${hospital.distance.toFixed(1)} km de distancia</div>` : ''}
               ${hospital.especialidades?.length > 0 ? 
                 `<div style="margin-top: 4px;">🏥 ${hospital.especialidades.join(', ')}</div>` : ''}
               ${hospital.camasDisponibles ? 
@@ -505,9 +666,9 @@ export default function MapaOperadorOptimizado() {
     const el = document.createElement('div');
     el.innerHTML = `
       <div style="
-        width: 55px; height: 55px; background: linear-gradient(135deg, #FF9800, #F57C00);
+        width: 60px; height: 60px; background: linear-gradient(135deg, #FF9800, #F57C00);
         border: 4px solid white; border-radius: 12px; display: flex; align-items: center;
-        justify-content: center; color: white; font-weight: bold; font-size: 24px;
+        justify-content: center; color: white; font-weight: bold; font-size: 26px;
         box-shadow: 0 6px 20px rgba(255,152,0,0.5); cursor: pointer;
         transform: rotate(45deg);
       ">⚠️</div>
@@ -521,7 +682,7 @@ export default function MapaOperadorOptimizado() {
             ${address}
           </div>
           <div style="font-size: 12px; color: #999;">
-            Haga clic en "Reportar Emergencia" para continuar
+            Ubicación del incidente reportado
           </div>
         </div>
       `);
@@ -535,6 +696,7 @@ export default function MapaOperadorOptimizado() {
     map.current.flyTo({
       center: [location.lng, location.lat],
       zoom: 16,
+      pitch: 65,
       duration: 1500
     });
 
@@ -645,7 +807,7 @@ export default function MapaOperadorOptimizado() {
 
       routeLayerIds.current = [routeId, routeId + '-glow'];
 
-      // Ajustar vista a la ruta
+      // Ajustar vista a la ruta con mejor perspectiva
       const bounds = new mapboxgl.LngLatBounds();
       routeGeometry.forEach(coord => {
         bounds.extend([coord[0], coord[1]]);
@@ -655,7 +817,7 @@ export default function MapaOperadorOptimizado() {
       map.current.fitBounds(bounds, {
         padding: 120,
         duration: 2000,
-        pitch: 50
+        pitch: 55 // Vista más inclinada para mejor perspectiva
       });
 
     } catch (error) {
@@ -678,7 +840,7 @@ export default function MapaOperadorOptimizado() {
     setRouteInfo(null);
   };
 
-  // ---------- ADDRESS SEARCH ----------
+  // ---------- ADDRESS SEARCH MEJORADO ----------
   const searchAddresses = async () => {
     if (!searchQuery.trim() || searchQuery.trim().length < 3) {
       setSearchResults([]);
@@ -703,7 +865,15 @@ export default function MapaOperadorOptimizado() {
       }
 
       const results = await response.json();
-      setSearchResults(results);
+      
+      // Filtrar resultados para mostrar solo direcciones relevantes
+      const filteredResults = results.filter(result => 
+        result.type === 'address' || 
+        result.relevance > 0.5 ||
+        result.place_name.toLowerCase().includes('morelia')
+      );
+      
+      setSearchResults(filteredResults);
 
     } catch (error) {
       console.error('❌ Error buscando direcciones:', error);
@@ -723,36 +893,34 @@ export default function MapaOperadorOptimizado() {
     );
   };
 
-  // ---------- EMERGENCY MANAGEMENT ----------
-  const startEmergency = async () => {
-    // Validaciones
-    if (!age || !sex || !emergencyType) {
-      showToast('warning', 'Datos Incompletos', 'Complete la información del paciente');
+  // ---------- NUEVA FUNCIÓN: IR AL LUGAR DEL ACCIDENTE ----------
+  const goToEmergencyLocation = () => {
+    if (!selectedLocation) {
+      showToast('warning', 'Ubicación Requerida', 'Primero busque y seleccione una ubicación');
       return;
     }
 
-    if (!selectedHospital) {
-      showToast('warning', 'Hospital No Seleccionado', 'Seleccione un hospital destino');
-      return;
-    }
+    // Centrar en la ubicación de emergencia
+    map.current.flyTo({
+      center: [selectedLocation.lng, selectedLocation.lat],
+      zoom: 16,
+      duration: 1500,
+      pitch: 65
+    });
 
-    const hospital = hospitals.find(h => h.id === selectedHospital && h.connected);
-    if (!hospital) {
-      showToast('error', 'Hospital No Disponible', 'El hospital seleccionado no está conectado');
-      return;
-    }
+    showToast('info', 'Navegando a Emergencia', 'Ubicación de emergencia centrada en el mapa');
+  };
 
+  // ---------- ENVIAR A SIGUIENTE HOSPITAL AUTOMÁTICAMENTE ----------
+  const sendToNextHospital = async (hospital) => {
     if (!pos) {
       showToast('error', 'Ubicación No Disponible', 'Esperando señal GPS...');
       return;
     }
 
-    // Usar ubicación de emergencia si está seleccionada, sino usar posición actual
-    const emergencyLocation = selectedLocation || pos;
-
     try {
       // Calcular ruta
-      const routeData = await calculateRoute(emergencyLocation, hospital);
+      const routeData = await calculateRoute(pos, hospital);
       if (!routeData) return;
 
       // Dibujar ruta en el mapa
@@ -763,16 +931,22 @@ export default function MapaOperadorOptimizado() {
         distance: (routeData.distance / 1000).toFixed(1),
         duration: Math.round(routeData.duration / 60),
         hospital: hospital.nombre,
-        address: hospital.direccion
+        address: hospital.direccion,
+        rawDistance: routeData.distance,
+        rawDuration: routeData.duration
       });
 
-      // Enviar notificación al hospital
-      const patientInfo = {
+      // Enviar notificación al siguiente hospital
+      const patientInfo = includePatientInfo ? {
         age: age,
         sex: sex,
         emergencyType: emergencyType,
         timestamp: new Date().toLocaleString(),
         emergencyLocation: selectedLocation ? searchQuery : 'Ubicación actual'
+      } : {
+        timestamp: new Date().toLocaleString(),
+        emergencyLocation: selectedLocation ? searchQuery : 'Ubicación actual',
+        infoProvided: false
       };
 
       safeSend({
@@ -780,10 +954,13 @@ export default function MapaOperadorOptimizado() {
         ambulanceId: 'UVI-01',
         hospitalId: hospital.id,
         patientInfo: patientInfo,
-        ambulanceLocation: emergencyLocation,
+        ambulanceLocation: selectedLocation || pos,
         eta: Math.round(routeData.duration / 60),
         distance: (routeData.distance / 1000).toFixed(1),
-        routeGeometry: routeData.geometry
+        routeGeometry: routeData.geometry,
+        rawDistance: routeData.distance,
+        rawDuration: routeData.duration,
+        emergencyMode: emergencyMode
       });
 
       // Configurar navegación
@@ -791,12 +968,108 @@ export default function MapaOperadorOptimizado() {
       setDestination(hospital);
       setHospitalNotification({
         type: 'pending',
-        message: `⏳ Esperando confirmación de ${hospital.nombre}...`
+        message: `⏳ Enviando solicitud a ${hospital.nombre}...`
       });
+
+      showToast('info', 'Solicitud Enviada', `Hospital ${hospital.nombre} notificado automáticamente`);
+
+    } catch (error) {
+      console.error('❌ Error enviando a siguiente hospital:', error);
+      showToast('error', 'Error del Sistema', 'No se pudo enviar la solicitud al siguiente hospital');
+    }
+  };
+
+  // ---------- EMERGENCY MANAGEMENT ----------
+  const startEmergency = async () => {
+    // Validaciones según el modo
+    if (emergencyMode === 'atender_emergencia' && !selectedLocation) {
+      showToast('warning', 'Ubicación Requerida', 'Seleccione la ubicación de la emergencia');
+      return;
+    }
+
+    if (emergencyMode === 'trasladar_paciente' && !selectedHospital) {
+      showToast('warning', 'Hospital No Seleccionado', 'Seleccione un hospital destino');
+      return;
+    }
+
+    const hospital = hospitals.find(h => h.id === selectedHospital && h.connected);
+    if (emergencyMode === 'trasladar_paciente' && !hospital) {
+      showToast('error', 'Hospital No Disponible', 'El hospital seleccionado no está conectado');
+      return;
+    }
+
+    if (!pos) {
+      showToast('error', 'Ubicación No Disponible', 'Esperando señal GPS...');
+      return;
+    }
+
+    // Determinar ubicación de inicio según el modo
+    const startLocation = emergencyMode === 'atender_emergencia' ? selectedLocation : pos;
+    const endLocation = emergencyMode === 'atender_emergencia' ? pos : hospital;
+
+    try {
+      // Calcular ruta
+      const routeData = await calculateRoute(startLocation, endLocation);
+      if (!routeData) return;
+
+      // Dibujar ruta en el mapa
+      drawRoute(routeData.geometry);
+      
+      // Actualizar información de ruta con formato mejorado
+      setRouteInfo({
+        distance: (routeData.distance / 1000).toFixed(1),
+        duration: Math.round(routeData.duration / 60),
+        hospital: hospital?.nombre || 'Ubicación Actual',
+        address: hospital?.direccion || 'Su ubicación',
+        rawDistance: routeData.distance,
+        rawDuration: routeData.duration
+      });
+
+      // Preparar información del paciente (opcional)
+      const patientInfo = includePatientInfo ? {
+        age: age,
+        sex: sex,
+        emergencyType: emergencyType,
+        timestamp: new Date().toLocaleString(),
+        emergencyLocation: selectedLocation ? searchQuery : 'Ubicación actual'
+      } : {
+        timestamp: new Date().toLocaleString(),
+        emergencyLocation: selectedLocation ? searchQuery : 'Ubicación actual',
+        infoProvided: false
+      };
+
+      // Solo enviar notificación si es modo traslado
+      if (emergencyMode === 'trasladar_paciente') {
+        safeSend({
+          type: 'patient_transfer_notification',
+          ambulanceId: 'UVI-01',
+          hospitalId: hospital.id,
+          patientInfo: patientInfo,
+          ambulanceLocation: startLocation,
+          eta: Math.round(routeData.duration / 60),
+          distance: (routeData.distance / 1000).toFixed(1),
+          routeGeometry: routeData.geometry,
+          rawDistance: routeData.distance,
+          rawDuration: routeData.duration,
+          emergencyMode: emergencyMode
+        });
+
+        setHospitalNotification({
+          type: 'pending',
+          message: `⏳ Esperando confirmación de ${hospital.nombre}...`
+        });
+      }
+
+      // Configurar navegación
+      setIsNavigating(true);
+      setDestination(endLocation);
 
       // Cerrar formulario
       onFormClose();
-      showToast('success', 'Emergencia Reportada', 'Hospital notificado y ruta calculada');
+      showToast('success', 
+        emergencyMode === 'atender_emergencia' ? 'Ruta a Emergencia Calculada' : 'Emergencia Reportada', 
+        emergencyMode === 'atender_emergencia' ? 'Navegando al punto de emergencia' : 'Hospital notificado y ruta calculada'
+      );
 
       // Limpiar formulario
       setAge('');
@@ -805,8 +1078,11 @@ export default function MapaOperadorOptimizado() {
       setSelectedHospital('');
       setSearchQuery('');
       setSelectedLocation(null);
+      setEmergencyStep('mode');
+      setEmergencyMode('');
+      setIncludePatientInfo(false);
       
-      // Remover marcador de emergencia
+      // Remover marcador de emergencia si existe
       if (emergencyMarker.current) {
         emergencyMarker.current.remove();
         emergencyMarker.current = null;
@@ -890,16 +1166,55 @@ export default function MapaOperadorOptimizado() {
     }
   };
 
+  const nextStep = () => {
+    if (emergencyStep === 'mode' && emergencyMode) {
+      if (emergencyMode === 'atender_emergencia') {
+        setEmergencyStep('location');
+      } else if (emergencyMode === 'trasladar_paciente') {
+        setEmergencyStep('patient');
+      }
+    } else if (emergencyStep === 'patient') {
+      setEmergencyStep('hospital');
+    } else if (emergencyStep === 'location') {
+      setEmergencyStep('hospital');
+    }
+  };
+
+  const prevStep = () => {
+    if (emergencyStep === 'patient' || emergencyStep === 'location') {
+      setEmergencyStep('mode');
+    } else if (emergencyStep === 'hospital') {
+      if (emergencyMode === 'atender_emergencia') {
+        setEmergencyStep('location');
+      } else {
+        setEmergencyStep('patient');
+      }
+    }
+  };
+
+  const resetForm = () => {
+    setEmergencyStep('mode');
+    setEmergencyMode('');
+    setIncludePatientInfo(false);
+    setAge('');
+    setSex('');
+    setEmergencyType('');
+    setSelectedHospital('');
+    setSearchQuery('');
+    setSelectedLocation(null);
+    onFormClose();
+  };
+
   // ---------- RENDER ----------
   return (
-    <ChakraProvider>
-      <Box height="100vh" display="flex" flexDirection="column" bg="gray.50">
+    <ChakraProvider theme={theme}>
+      <Box height="100vh" display="flex" flexDirection="column" bg={bgColor}>
         {/* Header */}
-        <Box bg="white" p={3} boxShadow="sm" borderBottom="1px" borderColor="gray.200">
+        <Box bg={headerBg} p={3} boxShadow="sm" borderBottom="1px" borderColor={borderColor}>
           <HStack justifyContent="space-between">
             <VStack align="start" spacing={0}>
-              <Text fontSize="xl" fontWeight="bold" color="gray.800">🚑 Ambulancia UVI-01</Text>
-              <Text fontSize="sm" color="gray.600">
+              <Text fontSize="xl" fontWeight="bold" color={textColor}>🚑 Ambulancia UVI-01</Text>
+              <Text fontSize="sm" color={textColor}>
                 {isNavigating ? `En ruta a ${destination?.nombre || 'hospital'}` : 'Modo disponible'}
                 <Badge ml={2} colorScheme={wsConnected ? "green" : isConnecting ? "yellow" : "red"} fontSize="xs">
                   {wsConnected ? "SISTEMA CONECTADO" : isConnecting ? "CONECTANDO..." : "SIN CONEXIÓN"}
@@ -919,6 +1234,7 @@ export default function MapaOperadorOptimizado() {
                   🕐 {routeInfo.duration} min • 📏 {routeInfo.distance} km
                 </Badge>
               )}
+              <ColorModeToggle />
             </HStack>
           </HStack>
         </Box>
@@ -926,7 +1242,7 @@ export default function MapaOperadorOptimizado() {
         {/* Main Content */}
         <Box flex={1} display="flex">
           {/* Side Panel */}
-          <Box width="420px" bg="white" p={4} overflowY="auto" boxShadow="md" borderRight="1px" borderColor="gray.200">
+          <Box width="420px" bg={cardBg} p={4} overflowY="auto" boxShadow="md" borderRight="1px" borderColor={borderColor}>
             <VStack spacing={4} align="stretch">
               {/* Emergency Button */}
               <Button 
@@ -942,8 +1258,21 @@ export default function MapaOperadorOptimizado() {
                 _hover={{ transform: 'translateY(-2px)', boxShadow: 'lg' }}
                 transition="all 0.2s"
               >
-                REPORTAR EMERGENCIA
+                INICIAR SERVICIO
               </Button>
+
+              {/* Go to Emergency Location Button */}
+              {selectedLocation && (
+                <Button 
+                  colorScheme="orange" 
+                  size="md"
+                  onClick={goToEmergencyLocation}
+                  leftIcon={<Text>📍</Text>}
+                  variant="outline"
+                >
+                  IR AL LUGAR DEL ACCIDENTE
+                </Button>
+              )}
 
               {/* Connection Status */}
               <Card bg={wsConnected ? "green.50" : isConnecting ? "yellow.50" : "red.50"} border="1px" borderColor={wsConnected ? "green.200" : isConnecting ? "yellow.200" : "red.200"}>
@@ -990,19 +1319,19 @@ export default function MapaOperadorOptimizado() {
               {/* Hospital List */}
               <Box>
                 <HStack justify="space-between" mb={3}>
-                  <Text fontWeight="bold" color="gray.800">🏥 Hospitales Disponibles</Text>
+                  <Text fontWeight="bold" color={textColor}>🏥 Hospitales Disponibles</Text>
                   <Button size="sm" onClick={refreshHospitals} isDisabled={!wsConnected} variant="outline">
                     🔄
                   </Button>
                 </HStack>
                 
                 <VStack spacing={2} align="stretch" maxH="300px" overflowY="auto">
-                  {hospitals.filter(h => h.connected).map(hospital => (
+                  {hospitals.filter(h => h.connected).map((hospital, index) => (
                     <Card 
                       key={hospital.id} 
-                      bg={selectedHospital === hospital.id ? "blue.50" : "white"}
+                      bg={selectedHospital === hospital.id ? "blue.50" : cardBg}
                       border="1px"
-                      borderColor={selectedHospital === hospital.id ? "blue.200" : "gray.200"}
+                      borderColor={selectedHospital === hospital.id ? "blue.200" : borderColor}
                       cursor="pointer"
                       onClick={() => setSelectedHospital(hospital.id)}
                       _hover={{ borderColor: "blue.300", transform: 'translateY(-1px)' }}
@@ -1011,10 +1340,22 @@ export default function MapaOperadorOptimizado() {
                       <CardBody p={3}>
                         <HStack justify="space-between">
                           <VStack align="start" spacing={0} flex={1}>
-                            <Text fontWeight="bold" fontSize="sm" color="gray.800">{hospital.nombre}</Text>
+                            <HStack>
+                              <Text fontWeight="bold" fontSize="sm" color={textColor}>{hospital.nombre}</Text>
+                              {index === 0 && (
+                                <Badge colorScheme="orange" fontSize="2xs">
+                                  MÁS CERCANO
+                                </Badge>
+                              )}
+                            </HStack>
                             <Text fontSize="xs" color="gray.600" noOfLines={1}>
                               {hospital.direccion}
                             </Text>
+                            {hospital.distance && (
+                              <Text fontSize="xs" color="green.600" fontWeight="bold">
+                                📏 {hospital.distance.toFixed(1)} km
+                              </Text>
+                            )}
                           </VStack>
                           <Badge colorScheme="green" fontSize="2xs">
                             {hospital.camasDisponibles || 0} camas
@@ -1057,7 +1398,7 @@ export default function MapaOperadorOptimizado() {
                         center: [pos.lng, pos.lat],
                         zoom: 16,
                         bearing: heading,
-                        pitch: 45,
+                        pitch: 65,
                         duration: 1000
                       });
                     }
@@ -1112,13 +1453,13 @@ export default function MapaOperadorOptimizado() {
                 position="absolute"
                 top="20px"
                 left="20px"
-                bg="white"
-                color="gray.800"
+                bg={cardBg}
+                color={textColor}
                 p={4}
                 borderRadius="md"
                 boxShadow="xl"
                 border="1px"
-                borderColor="gray.200"
+                borderColor={borderColor}
                 zIndex="1000"
                 minWidth="300px"
               >
@@ -1143,175 +1484,345 @@ export default function MapaOperadorOptimizado() {
       </Box>
 
       {/* Emergency Form Modal */}
-      <Modal isOpen={isFormOpen} onClose={onFormClose} size="2xl">
+      <Modal isOpen={isFormOpen} onClose={resetForm} size="2xl">
         <ModalOverlay />
         <ModalContent>
           <ModalHeader bg="red.600" color="white" borderBottomRadius="0">
-            🚨 Reporte de Emergencia - Sistema de Ambulancias
+            🚨 Sistema de Servicios de Emergencia
           </ModalHeader>
           <ModalBody py={6}>
             <VStack spacing={6} align="stretch">
-              {/* Patient Information */}
+              {/* Progress Steps */}
               <Box>
-                <Text fontWeight="bold" mb={3} color="gray.800" fontSize="lg">Información del Paciente</Text>
-                <HStack spacing={4}>
-                  <Input
-                    placeholder="Edad del paciente"
-                    value={age}
-                    onChange={(e) => setAge(e.target.value)}
-                    type="number"
-                    size="lg"
-                  />
-                  <Select
-                    placeholder="Sexo"
-                    value={sex}
-                    onChange={(e) => setSex(e.target.value)}
-                    size="lg"
-                  >
-                    <option value="M">Masculino</option>
-                    <option value="F">Femenino</option>
-                    <option value="O">Otro</option>
-                  </Select>
-                  <Input
-                    placeholder="Tipo de emergencia"
-                    value={emergencyType}
-                    onChange={(e) => setEmergencyType(e.target.value)}
-                    size="lg"
-                  />
+                <HStack justify="center" spacing={4}>
+                  <Badge colorScheme={emergencyStep === 'mode' ? 'red' : 'gray'} p={2} borderRadius="md">
+                    1. Modo
+                  </Badge>
+                  <Badge colorScheme={['patient', 'location'].includes(emergencyStep) ? 'orange' : 'gray'} p={2} borderRadius="md">
+                    2. {emergencyMode === 'atender_emergencia' ? 'Ubicación' : 'Paciente'}
+                  </Badge>
+                  <Badge colorScheme={emergencyStep === 'hospital' ? 'green' : 'gray'} p={2} borderRadius="md">
+                    3. Destino
+                  </Badge>
                 </HStack>
               </Box>
 
-              {/* Address Search */}
-              <Box>
-                <Text fontWeight="bold" mb={3} color="gray.800" fontSize="lg">Ubicación de la Emergencia</Text>
-                <VStack spacing={3}>
-                  <InputGroup size="lg">
-                    <Input
-                      placeholder="Buscar dirección en Morelia..."
-                      value={searchQuery}
-                      onChange={(e) => {
-                        setSearchQuery(e.target.value);
-                        if (e.target.value.length >= 3) {
-                          searchAddresses();
-                        } else {
-                          setSearchResults([]);
-                        }
-                      }}
-                    />
-                    <InputRightElement>
-                      {isSearching ? (
-                        <Spinner size="sm" />
-                      ) : searchQuery ? (
-                        <IconButton
-                          aria-label="Clear search"
-                          icon={<CloseIcon />}
-                          size="sm"
-                          variant="ghost"
-                          onClick={clearSearch}
-                        />
-                      ) : (
-                        <SearchIcon color="gray.400" />
-                      )}
-                    </InputRightElement>
-                  </InputGroup>
+              {/* Step 1: Mode Selection */}
+              {emergencyStep === 'mode' && (
+                <Box>
+                  <Text fontWeight="bold" mb={4} color="gray.800" fontSize="lg" textAlign="center">
+                    Seleccione el tipo de servicio
+                  </Text>
+                  <RadioGroup onChange={setEmergencyMode} value={emergencyMode}>
+                    <Stack spacing={4}>
+                      <Card 
+                        border="2px" 
+                        borderColor={emergencyMode === 'atender_emergencia' ? 'red.300' : 'gray.200'}
+                        cursor="pointer"
+                        onClick={() => setEmergencyMode('atender_emergencia')}
+                        _hover={{ borderColor: 'red.200' }}
+                      >
+                        <CardBody>
+                          <HStack>
+                            <Radio value="atender_emergencia" colorScheme="red" />
+                            <VStack align="start" spacing={1}>
+                              <Text fontWeight="bold" color="red.600">🚑 Atender Emergencia</Text>
+                              <Text fontSize="sm" color="gray.600">
+                                Navegar a una ubicación específica para atender una emergencia
+                              </Text>
+                            </VStack>
+                          </HStack>
+                        </CardBody>
+                      </Card>
+
+                      <Card 
+                        border="2px" 
+                        borderColor={emergencyMode === 'trasladar_paciente' ? 'blue.300' : 'gray.200'}
+                        cursor="pointer"
+                        onClick={() => setEmergencyMode('trasladar_paciente')}
+                        _hover={{ borderColor: 'blue.200' }}
+                      >
+                        <CardBody>
+                          <HStack>
+                            <Radio value="trasladar_paciente" colorScheme="blue" />
+                            <VStack align="start" spacing={1}>
+                              <Text fontWeight="bold" color="blue.600">🏥 Trasladar Paciente</Text>
+                              <Text fontSize="sm" color="gray.600">
+                                Llevar paciente actual a un hospital específico
+                              </Text>
+                            </VStack>
+                          </HStack>
+                        </CardBody>
+                      </Card>
+                    </Stack>
+                  </RadioGroup>
+                </Box>
+              )}
+
+              {/* Step 2: Patient Information (Opcional) */}
+              {emergencyStep === 'patient' && (
+                <Box>
+                  <Text fontWeight="bold" mb={3} color="gray.800" fontSize="lg">
+                    Información del Paciente (Opcional)
+                  </Text>
                   
-                  {/* Search Results */}
-                  {searchResults.length > 0 && (
-                    <Card width="100%" maxH="200px" overflowY="auto">
-                      <CardBody p={0}>
-                        <List spacing={0}>
-                          {searchResults.map((result, index) => (
-                            <ListItem 
-                              key={result.id}
-                              p={3}
-                              borderBottom="1px"
-                              borderColor="gray.100"
-                              cursor="pointer"
-                              _hover={{ bg: "blue.50" }}
-                              onClick={() => selectSearchResult(result)}
-                            >
-                              <VStack align="start" spacing={0}>
-                                <Text fontSize="sm" fontWeight="medium">{result.place_name}</Text>
-                                <Text fontSize="xs" color="gray.500">
-                                  {result.type === 'address' ? 'Dirección exacta' : 'Lugar de interés'}
-                                </Text>
-                              </VStack>
-                            </ListItem>
-                          ))}
-                        </List>
-                      </CardBody>
-                    </Card>
+                  <Checkbox 
+                    colorScheme="blue" 
+                    isChecked={includePatientInfo}
+                    onChange={(e) => setIncludePatientInfo(e.target.checked)}
+                    mb={4}
+                  >
+                    Incluir información del paciente
+                  </Checkbox>
+
+                  {includePatientInfo && (
+                    <HStack spacing={4}>
+                      <Input
+                        placeholder="Edad del paciente"
+                        value={age}
+                        onChange={(e) => setAge(e.target.value)}
+                        type="number"
+                        size="lg"
+                      />
+                      <Select
+                        placeholder="Sexo"
+                        value={sex}
+                        onChange={(e) => setSex(e.target.value)}
+                        size="lg"
+                      >
+                        <option value="M">Masculino</option>
+                        <option value="F">Femenino</option>
+                        <option value="O">Otro</option>
+                      </Select>
+                      <Input
+                        placeholder="Tipo de emergencia"
+                        value={emergencyType}
+                        onChange={(e) => setEmergencyType(e.target.value)}
+                        size="lg"
+                      />
+                    </HStack>
                   )}
                   
-                  {selectedLocation && (
+                  {!includePatientInfo && (
                     <Alert status="info" borderRadius="md">
                       <AlertIcon />
                       <Box>
-                        <AlertTitle fontSize="sm">Ubicación seleccionada</AlertTitle>
-                        <AlertDescription fontSize="xs">
-                          {searchQuery}
+                        <AlertTitle>Información opcional</AlertTitle>
+                        <AlertDescription>
+                          Puede continuar sin proporcionar información del paciente
                         </AlertDescription>
                       </Box>
                     </Alert>
                   )}
-                </VStack>
-              </Box>
+                </Box>
+              )}
 
-              {/* Hospital Selection */}
-              <Box>
-                <Text fontWeight="bold" mb={3} color="gray.800" fontSize="lg">Seleccionar Hospital Destino</Text>
-                {hospitals.filter(h => h.connected).length === 0 ? (
-                  <Alert status="warning" borderRadius="md">
-                    <AlertIcon />
-                    No hay hospitales disponibles
-                  </Alert>
-                ) : (
-                  <VStack spacing={2} maxH="200px" overflowY="auto">
-                    {hospitals.filter(h => h.connected).map(hospital => (
-                      <Card
-                        key={hospital.id}
-                        bg={selectedHospital === hospital.id ? "blue.50" : "white"}
-                        border="1px"
-                        borderColor={selectedHospital === hospital.id ? "blue.200" : "gray.200"}
-                        cursor="pointer"
-                        onClick={() => setSelectedHospital(hospital.id)}
-                        width="100%"
-                        _hover={{ borderColor: "blue.300" }}
-                      >
-                        <CardBody p={3}>
-                          <HStack justify="space-between">
-                            <VStack align="start" spacing={0}>
-                              <Text fontWeight="bold" fontSize="sm">{hospital.nombre}</Text>
-                              <Text fontSize="xs" color="gray.600" noOfLines={1}>
-                                {hospital.direccion}
-                              </Text>
-                            </VStack>
-                            <Badge colorScheme="green" fontSize="2xs">
-                              {hospital.camasDisponibles || 0} camas
-                            </Badge>
-                          </HStack>
+              {/* Step 2: Address Search (Para atender emergencia) */}
+              {emergencyStep === 'location' && (
+                <Box>
+                  <Text fontWeight="bold" mb={3} color="gray.800" fontSize="lg">
+                    Ubicación de la Emergencia
+                  </Text>
+                  <VStack spacing={3}>
+                    <Alert status="info" borderRadius="md">
+                      <AlertIcon />
+                      <Box>
+                        <AlertTitle>Seleccione ubicación de la emergencia</AlertTitle>
+                        <AlertDescription>
+                          Busque la dirección del incidente
+                        </AlertDescription>
+                      </Box>
+                    </Alert>
+
+                    <InputGroup size="lg">
+                      <Input
+                        placeholder="Buscar dirección en Morelia..."
+                        value={searchQuery}
+                        onChange={(e) => {
+                          setSearchQuery(e.target.value);
+                          if (e.target.value.length >= 3) {
+                            searchAddresses();
+                          } else {
+                            setSearchResults([]);
+                          }
+                        }}
+                      />
+                      <InputRightElement>
+                        {isSearching ? (
+                          <Spinner size="sm" />
+                        ) : searchQuery ? (
+                          <IconButton
+                            aria-label="Clear search"
+                            icon={<CloseIcon />}
+                            size="sm"
+                            variant="ghost"
+                            onClick={clearSearch}
+                          />
+                        ) : (
+                          <SearchIcon color="gray.400" />
+                        )}
+                      </InputRightElement>
+                    </InputGroup>
+                    
+                    {/* Search Results */}
+                    {searchResults.length > 0 && (
+                      <Card width="100%" maxH="200px" overflowY="auto">
+                        <CardBody p={0}>
+                          <List spacing={0}>
+                            {searchResults.map((result, index) => (
+                              <ListItem 
+                                key={result.id}
+                                p={3}
+                                borderBottom="1px"
+                                borderColor="gray.100"
+                                cursor="pointer"
+                                _hover={{ bg: "blue.50" }}
+                                onClick={() => selectSearchResult(result)}
+                              >
+                                <VStack align="start" spacing={0}>
+                                  <Text fontSize="sm" fontWeight="medium">{result.place_name}</Text>
+                                  <Text fontSize="xs" color="gray.500">
+                                    {result.type === 'address' ? 'Dirección exacta' : 'Lugar de interés'}
+                                  </Text>
+                                </VStack>
+                              </ListItem>
+                            ))}
+                          </List>
                         </CardBody>
                       </Card>
-                    ))}
+                    )}
+                    
+                    {selectedLocation && (
+                      <Alert status="success" borderRadius="md">
+                        <AlertIcon />
+                        <Box>
+                          <AlertTitle fontSize="sm">Ubicación seleccionada</AlertTitle>
+                          <AlertDescription fontSize="xs">
+                            {searchQuery}
+                          </AlertDescription>
+                        </Box>
+                      </Alert>
+                    )}
+
+                    <Button 
+                      colorScheme="blue" 
+                      variant="outline"
+                      onClick={() => {
+                        setSelectedLocation(null);
+                        setSearchQuery('');
+                        showToast('info', 'Usando Ubicación Actual', 'Se utilizará su ubicación GPS actual');
+                      }}
+                    >
+                      📍 Usar Mi Ubicación Actual
+                    </Button>
                   </VStack>
-                )}
-              </Box>
+                </Box>
+              )}
+
+              {/* Step 3: Hospital Selection */}
+              {emergencyStep === 'hospital' && (
+                <Box>
+                  <Text fontWeight="bold" mb={3} color="gray.800" fontSize="lg">
+                    {emergencyMode === 'atender_emergencia' ? 'Confirmar Destino' : 'Seleccionar Hospital Destino'}
+                  </Text>
+                  
+                  {emergencyMode === 'atender_emergencia' ? (
+                    <Alert status="warning" borderRadius="md">
+                      <AlertIcon />
+                      <Box>
+                        <AlertTitle>Navegación a Emergencia</AlertTitle>
+                        <AlertDescription>
+                          Se calculará la ruta desde la ubicación de emergencia hasta su posición actual
+                        </AlertDescription>
+                      </Box>
+                    </Alert>
+                  ) : hospitals.filter(h => h.connected).length === 0 ? (
+                    <Alert status="warning" borderRadius="md">
+                      <AlertIcon />
+                      No hay hospitales disponibles
+                    </Alert>
+                  ) : (
+                    <VStack spacing={2} maxH="300px" overflowY="auto">
+                      {hospitals.filter(h => h.connected).map((hospital, index) => (
+                        <Card
+                          key={hospital.id}
+                          bg={selectedHospital === hospital.id ? "blue.50" : "white"}
+                          border="1px"
+                          borderColor={selectedHospital === hospital.id ? "blue.200" : "gray.200"}
+                          cursor="pointer"
+                          onClick={() => setSelectedHospital(hospital.id)}
+                          width="100%"
+                          _hover={{ borderColor: "blue.300" }}
+                        >
+                          <CardBody p={3}>
+                            <HStack justify="space-between">
+                              <VStack align="start" spacing={0}>
+                                <HStack>
+                                  <Text fontWeight="bold" fontSize="sm">{hospital.nombre}</Text>
+                                  {index === 0 && (
+                                    <Badge colorScheme="orange" fontSize="2xs">
+                                      RECOMENDADO
+                                    </Badge>
+                                  )}
+                                </HStack>
+                                <Text fontSize="xs" color="gray.600" noOfLines={1}>
+                                  {hospital.direccion}
+                                </Text>
+                                {hospital.distance && (
+                                  <Text fontSize="xs" color="green.600" fontWeight="bold">
+                                    📏 {hospital.distance.toFixed(1)} km • 🕐 ~{Math.round(hospital.distance * 2)} min
+                                  </Text>
+                                )}
+                              </VStack>
+                              <Badge colorScheme="green" fontSize="2xs">
+                                {hospital.camasDisponibles || 0} camas
+                              </Badge>
+                            </HStack>
+                          </CardBody>
+                        </Card>
+                      ))}
+                    </VStack>
+                  )}
+                </Box>
+              )}
             </VStack>
           </ModalBody>
           <ModalFooter>
-            <Button variant="ghost" mr={3} onClick={onFormClose} size="lg">
-              Cancelar
-            </Button>
-            <Button 
-              colorScheme="red" 
-              onClick={startEmergency}
-              isDisabled={!selectedHospital || !age || !sex || !emergencyType}
-              size="lg"
-              fontSize="md"
-              fontWeight="bold"
-            >
-              🚑 Confirmar y Trazar Ruta
-            </Button>
+            <HStack spacing={3} width="100%" justify="space-between">
+              <Button 
+                variant="ghost" 
+                onClick={emergencyStep === 'mode' ? resetForm : prevStep}
+                size="lg"
+              >
+                {emergencyStep === 'mode' ? 'Cancelar' : 'Atrás'}
+              </Button>
+              
+              {emergencyStep !== 'hospital' ? (
+                <Button 
+                  colorScheme="blue" 
+                  onClick={nextStep}
+                  isDisabled={
+                    (emergencyStep === 'mode' && !emergencyMode) ||
+                    (emergencyStep === 'location' && !selectedLocation && !searchQuery) ||
+                    (emergencyStep === 'patient' && includePatientInfo && (!age || !sex || !emergencyType))
+                  }
+                  size="lg"
+                >
+                  Siguiente
+                </Button>
+              ) : (
+                <Button 
+                  colorScheme="red" 
+                  onClick={startEmergency}
+                  isDisabled={emergencyMode === 'trasladar_paciente' && !selectedHospital}
+                  size="lg"
+                  fontSize="md"
+                  fontWeight="bold"
+                >
+                  {emergencyMode === 'atender_emergencia' ? '🚑 Calcular Ruta a Emergencia' : '🏥 Confirmar y Trazar Ruta'}
+                </Button>
+              )}
+            </HStack>
           </ModalFooter>
         </ModalContent>
       </Modal>
