@@ -1,4 +1,4 @@
-// MapaHospitalOptimizado.jsx
+// MapaHospitalOptimizado.jsx - VERSIÓN ACTUALIZADA
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
@@ -168,7 +168,6 @@ export default function MapaHospitalOptimizado() {
                   geometry: data.routeGeometry,
                   distance: data.distance,
                   duration: data.duration,
-                  // Formato mejorado para display
                   formattedDistance: data.distance ? `${(data.distance / 1000).toFixed(1)} km` : 'Calculando...',
                   formattedDuration: data.duration ? `${Math.round(data.duration / 60)} min` : 'Calculando...'
                 });
@@ -196,6 +195,10 @@ export default function MapaHospitalOptimizado() {
                 clearRoute();
                 showToast('warning', 'Paciente Rechazado', 'Se ha notificado a la ambulancia');
               }
+              break;
+
+            case 'hospital_inactive_warning':
+              showToast('warning', 'Advertencia del Sistema', data.message || 'Hospital marcado como inactivo en BD');
               break;
 
             case 'error':
@@ -248,16 +251,31 @@ export default function MapaHospitalOptimizado() {
       return;
     }
 
-    if (hospitalInfo.lat && hospitalInfo.lng) {
-      ws.current.send(JSON.stringify({
-        type: 'register_hospital',
-        hospital: hospitalInfo
-      }));
-
-      console.log('🏥 Hospital registrado con coordenadas:', hospitalInfo.nombre);
-    } else {
-      console.error('❌ No se puede registrar hospital sin coordenadas válidas');
+    // Verificar que el hospital esté activo en BD antes de registrar
+    if (hospitalInfo.activo === false) {
+      showToast('warning', 'Hospital Inactivo', 'Este hospital está marcado como inactivo en el sistema');
+      return;
     }
+
+    // Asegurarse de usar el ID correcto del hospital
+    const hospitalData = {
+      id: hospitalInfo.id_hospitales?.toString() || hospitalInfo.id,
+      nombre: hospitalInfo.nombre,
+      direccion: hospitalInfo.direccion,
+      lat: hospitalInfo.lat || hospitalInfo.ubicacion?.lat,
+      lng: hospitalInfo.lng || hospitalInfo.ubicacion?.lng,
+      especialidades: hospitalInfo.especialidades || ['General'],
+      camasDisponibles: hospitalInfo.camasDisponibles || 10,
+      telefono: hospitalInfo.telefono || '',
+      activo: hospitalInfo.activo !== undefined ? hospitalInfo.activo : true
+    };
+
+    ws.current.send(JSON.stringify({
+      type: 'register_hospital',
+      hospital: hospitalData
+    }));
+
+    console.log('🏥 Hospital registrado:', hospitalData.nombre, 'Activo:', hospitalData.activo);
   }, [hospitalInfo]);
 
   // ---------- HOSPITAL DATA LOADING ----------
@@ -281,7 +299,8 @@ export default function MapaHospitalOptimizado() {
           lng: stored.lng,
           especialidades: stored.especialidades || ['General'],
           camasDisponibles: stored.camasDisponibles || 10,
-          telefono: stored.telefono || ''
+          telefono: stored.telefono || '',
+          activo: stored.activo !== undefined ? stored.activo : true
         };
 
         if (hospitalData.direccion && (!hospitalData.lat || !hospitalData.lng)) {
@@ -294,7 +313,8 @@ export default function MapaHospitalOptimizado() {
           localStorage.setItem("hospitalInfo", JSON.stringify({
             ...stored,
             lat: verifiedCoords.lat,
-            lng: verifiedCoords.lng
+            lng: verifiedCoords.lng,
+            activo: hospitalData.activo
           }));
         }
 
@@ -385,7 +405,7 @@ export default function MapaHospitalOptimizado() {
     };
   }, [hospitalInfo, colorMode]);
 
-  // ---------- WEBSOCKET LIFECYCLE CORREGIDO ----------
+  // ---------- WEBSOCKET LIFECYCLE ----------
   useEffect(() => {
     if (hospitalInfo) {
       const timeoutId = setTimeout(() => {
@@ -394,7 +414,7 @@ export default function MapaHospitalOptimizado() {
 
       return () => clearTimeout(timeoutId);
     }
-  }, [hospitalInfo]); // Eliminada dependencia problemática
+  }, [hospitalInfo, connectWebSocket]);
 
   // Cleanup effect
   useEffect(() => {
@@ -517,6 +537,7 @@ export default function MapaHospitalOptimizado() {
               <div><strong>📞 Teléfono:</strong> ${hospitalInfo.telefono || 'No disponible'}</div>
               <div><strong>🛏️ Camas disponibles:</strong> ${hospitalInfo.camasDisponibles}</div>
               <div><strong>🏥 Especialidades:</strong> ${hospitalInfo.especialidades.join(', ')}</div>
+              <div><strong>📊 Estado:</strong> ${hospitalInfo.activo ? '✅ ACTIVO' : '❌ INACTIVO'}</div>
             </div>
             <em style="color: #888; font-size: 12px;">Centro médico operativo - Sistema de emergencias</em>
           </div>
@@ -724,7 +745,6 @@ export default function MapaHospitalOptimizado() {
       id: data.notificationId || `notif_${Date.now()}`,
       timestamp: new Date().toLocaleString(),
       status: 'pending',
-      // Formato mejorado para display - usar los datos que vienen del operador
       formattedDistance: data.distance ? `${data.distance} km` : 'Calculando...',
       formattedDuration: data.eta ? `${data.eta} min` : 'Calculando...',
       rawDistance: data.rawDistance,
@@ -903,7 +923,7 @@ export default function MapaHospitalOptimizado() {
           <HStack justifyContent="space-between">
             <VStack align="start" spacing={0}>
               <Text fontSize="xl" fontWeight="bold" color={textColor}>
-                🏥 {hospitalInfo.nombre}
+                🏥 {hospitalInfo.nombre} {hospitalInfo.activo ? '✅' : '❌'}
               </Text>
               <Text fontSize="sm" color={textColor}>
                 Centro de Control Hospitalario - Monitoreo de Emergencias
@@ -953,6 +973,7 @@ export default function MapaHospitalOptimizado() {
                     <Text fontSize="sm"><strong>Teléfono:</strong> {hospitalInfo.telefono || 'No disponible'}</Text>
                     <Text fontSize="sm"><strong>Camas disponibles:</strong> {hospitalInfo.camasDisponibles}</Text>
                     <Text fontSize="sm"><strong>Especialidades:</strong> {hospitalInfo.especialidades.join(', ')}</Text>
+                    <Text fontSize="sm"><strong>Estado en BD:</strong> {hospitalInfo.activo ? '✅ ACTIVO' : '❌ INACTIVO'}</Text>
                   </VStack>
                 </CardBody>
               </Card>

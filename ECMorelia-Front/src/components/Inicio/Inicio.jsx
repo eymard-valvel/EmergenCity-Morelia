@@ -141,7 +141,7 @@ const Inicio = () => {
       className="px-6 py-3 rounded-xl border-2 border-sky-blue text-sky-blue text-lg font-semibold 
       hover:text-white hover:bg-gradient-to-br from-sky-blue to-blue-400 
       transition-all duration-300 shadow-md hover:shadow-xl"
-      onClick={() => handleButtonClick("hospital")}
+      onClick={() => handleButtonClick("hospitales")}
     >
       Hospital
     </button>

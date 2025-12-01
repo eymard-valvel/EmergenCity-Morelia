@@ -1,11 +1,13 @@
-// websocket-server-optimized.js
+// websocket-server-optimized.js - VERSIÓN SIMPLIFICADA
 const WebSocket = require('ws');
 const http = require('http');
 const express = require('express');
 const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
+const { PrismaClient } = require('@prisma/client');
 
 const app = express();
 const server = http.createServer(app);
+const prisma = new PrismaClient();
 
 const wss = new WebSocket.Server({
   server,
@@ -30,6 +32,38 @@ app.use((req, res, next) => {
   next();
 });
 app.options('*', (req, res) => res.sendStatus(200));
+
+// ---------- CONSULTA DE HOSPITALES DESDE PRISMA (SIMPLIFICADO) ----------
+async function getAllHospitalsFromDB() {
+  try {
+    const hospitals = await prisma.hospitales.findMany({
+      select: {
+        id_hospitales: true,
+        nombre: true,
+        direccion: true
+        // Solo estos campos existen según tu modelo
+      }
+      // Traemos TODOS los hospitales
+    });
+
+    return hospitals.map(hospital => ({
+      id: hospital.id_hospitales.toString(),
+      nombre: hospital.nombre || `Hospital ${hospital.id_hospitales}`,
+      direccion: hospital.direccion || '',
+      lat: 19.7024, // Valor por defecto
+      lng: -101.1969, // Valor por defecto
+      especialidades: ['General'], // Por defecto ya que no hay en BD
+      camasDisponibles: 10, // Por defecto ya que no hay en BD
+      telefono: '', // Por defecto ya que no hay en BD
+      activo: true, // Por defecto ya que no hay campo activo en BD
+      connected: false, // Inicialmente desconectado (WebSocket)
+      db_activo: true // Por defecto
+    }));
+  } catch (error) {
+    console.error('❌ Error consultando hospitales desde DB:', error);
+    return [];
+  }
+}
 
 // ---------- GEOCODING MEJORADO PARA MORELIA ----------
 async function geocodeAddressMorelia(address) {
@@ -85,7 +119,7 @@ async function geocodeAddressMorelia(address) {
   }
 }
 
-// ---------- SEARCH ADDRESSES MEJORADO (Para autocompletado real) ----------
+// ---------- SEARCH ADDRESSES MEJORADO ----------
 async function searchAddressesMorelia(query) {
   if (!query || query.trim().length < 3) {
     return [];
@@ -94,7 +128,6 @@ async function searchAddressesMorelia(query) {
   try {
     const q = encodeURIComponent(query.trim());
     
-    // URL mejorada para buscar direcciones específicas en Morelia
     const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${q}.json?access_token=${MAPBOX_TOKEN}&country=mx&limit=10&types=address,poi,place&bbox=-101.2676,19.6410,-101.1262,19.7638&language=es`;
     
     console.log(`🔍 Buscando direcciones: ${query}`);
@@ -109,7 +142,6 @@ async function searchAddressesMorelia(query) {
     // Filtrar y priorizar resultados relevantes
     const filteredResults = data.features
       .filter(feature => {
-        // Priorizar direcciones exactas y lugares en Morelia
         const isAddress = feature.place_type.includes('address');
         const isPOI = feature.place_type.includes('poi');
         const isPlace = feature.place_type.includes('place');
@@ -127,10 +159,9 @@ async function searchAddressesMorelia(query) {
         type: feature.place_type[0],
         address: feature.properties?.address || '',
         relevance: feature.relevance,
-        // Información adicional de contexto
         context: feature.context?.map(ctx => ctx.text).join(', ') || ''
       }))
-      .sort((a, b) => b.relevance - a.relevance); // Ordenar por relevancia
+      .sort((a, b) => b.relevance - a.relevance);
 
     console.log(`✅ ${filteredResults.length} resultados encontrados para: ${query}`);
     return filteredResults;
@@ -196,7 +227,6 @@ async function sendToNextAvailableHospital(ambulanceId, patientInfo, ambulanceLo
       hospital.ws.readyState === WebSocket.OPEN
     )
     .sort((a, b) => {
-      // Ordenar por distancia (más cercano primero)
       const distA = calculateDistance(
         ambulanceLocation.lat, ambulanceLocation.lng,
         a.info.lat, a.info.lng
@@ -216,7 +246,6 @@ async function sendToNextAvailableHospital(ambulanceId, patientInfo, ambulanceLo
   const nextHospital = hospitalsList[0];
   console.log(`🔄 Enviando automáticamente a hospital: ${nextHospital.info.nombre}`);
 
-  // Calcular ruta al siguiente hospital
   const route = await getDirectionsWithTraffic(
     ambulanceLocation.lng,
     ambulanceLocation.lat,
@@ -240,18 +269,16 @@ async function sendToNextAvailableHospital(ambulanceId, patientInfo, ambulanceLo
     rawDuration: route ? route.duration : null,
     timestamp: new Date().toISOString(),
     status: 'pending',
-    isAutomatic: true // Marcar como envío automático
+    isAutomatic: true
   };
 
   pendingNotifications.set(notificationId, payload);
 
-  // Enviar notificación al siguiente hospital
   if (nextHospital.ws && nextHospital.ws.readyState === WebSocket.OPEN) {
     sendMessage(nextHospital.ws, payload);
     console.log(`📩 Notificación automática enviada a hospital ${nextHospital.info.id}`);
   }
 
-  // Notificar a la ambulancia sobre el envío automático
   const ambulance = activeAmbulances.get(ambulanceId);
   if (ambulance && ambulance.ws) {
     sendMessage(ambulance.ws, {
@@ -267,7 +294,7 @@ async function sendToNextAvailableHospital(ambulanceId, patientInfo, ambulanceLo
 }
 
 function calculateDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Radio de la Tierra en km
+  const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a = 
@@ -322,10 +349,12 @@ function broadcastActiveHospitals() {
     lat: hospital.info.lat,
     lng: hospital.info.lng,
     direccion: hospital.info.direccion,
-    especialidades: hospital.info.especialidades || [],
-    camasDisponibles: hospital.info.camasDisponibles || 0,
+    especialidades: hospital.info.especialidades || ['General'],
+    camasDisponibles: hospital.info.camasDisponibles || 10,
     telefono: hospital.info.telefono || '',
-    connected: true
+    connected: true,
+    status: 'active',
+    connectedAt: hospital.connectedAt
   }));
   
   broadcastToAmbulances({
@@ -366,19 +395,100 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.get('/hospitals', (req, res) => {
-  const hospitalsList = Array.from(activeHospitals.values()).map(hospital => ({
-    id: hospital.info.id,
-    nombre: hospital.info.nombre,
-    direccion: hospital.info.direccion,
-    lat: hospital.info.lat,
-    lng: hospital.info.lng,
-    especialidades: hospital.info.especialidades,
-    camasDisponibles: hospital.info.camasDisponibles,
-    telefono: hospital.info.telefono
-  }));
-  
-  res.json({ hospitals: hospitalsList, total: hospitalsList.length });
+// Endpoint para obtener TODOS los hospitales (conectados y desconectados)
+app.get('/api/all-hospitals', async (req, res) => {
+  try {
+    const hospitalsFromDB = await getAllHospitalsFromDB();
+    
+    // Geocodificar hospitales para obtener coordenadas
+    const hospitalsWithCoords = await Promise.all(
+      hospitalsFromDB.map(async (hospital) => {
+        if (hospital.direccion && hospital.direccion.trim() !== '') {
+          const geoResult = await geocodeAddressMorelia(hospital.direccion);
+          if (geoResult) {
+            hospital.lat = geoResult.lat;
+            hospital.lng = geoResult.lng;
+          }
+        }
+        return hospital;
+      })
+    );
+    
+    // Marcamos cuáles están conectados actualmente vía WebSocket
+    const hospitalsWithStatus = hospitalsWithCoords.map(hospital => ({
+      ...hospital,
+      connected: activeHospitals.has(hospital.id),
+      // Todos están activos por defecto ya que no hay campo activo en BD
+      status: activeHospitals.has(hospital.id) ? 'active' : 'inactive'
+    }));
+
+    res.json({ 
+      hospitals: hospitalsWithStatus,
+      total: hospitalsWithStatus.length,
+      connected: activeHospitals.size
+    });
+  } catch (error) {
+    console.error('❌ Error en /api/all-hospitals:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+// Endpoint para hospitales conectados
+app.get('/api/connected-hospitals', async (req, res) => {
+  try {
+    const connectedHospitals = Array.from(activeHospitals.values())
+      .map(hospitalData => ({
+        id: hospitalData.info.id,
+        nombre: hospitalData.info.nombre,
+        lat: hospitalData.info.lat,
+        lng: hospitalData.info.lng,
+        direccion: hospitalData.info.direccion,
+        especialidades: hospitalData.info.especialidades || ['General'],
+        camasDisponibles: hospitalData.info.camasDisponibles || 10,
+        telefono: hospitalData.info.telefono || '',
+        connected: true,
+        status: 'active',
+        connectedAt: hospitalData.connectedAt
+      }));
+
+    res.json({ 
+      hospitals: connectedHospitals,
+      total: connectedHospitals.length
+    });
+  } catch (error) {
+    console.error('❌ Error en /api/connected-hospitals:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+// Endpoint original para compatibilidad
+app.get('/api/hospitals', async (req, res) => {
+  try {
+    const hospitalsFromDB = await getAllHospitalsFromDB();
+    
+    // Geocodificar hospitales para obtener coordenadas
+    const hospitalsWithCoords = await Promise.all(
+      hospitalsFromDB.map(async (hospital) => {
+        if (hospital.direccion && hospital.direccion.trim() !== '') {
+          const geoResult = await geocodeAddressMorelia(hospital.direccion);
+          if (geoResult) {
+            hospital.lat = geoResult.lat;
+            hospital.lng = geoResult.lng;
+          }
+        }
+        return hospital;
+      })
+    );
+
+    res.json({ 
+      hospitals: hospitalsWithCoords,
+      total: hospitalsWithCoords.length,
+      connected: activeHospitals.size
+    });
+  } catch (error) {
+    console.error('❌ Error en /api/hospitals:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
 });
 
 app.post('/geocode', async (req, res) => {
@@ -509,7 +619,11 @@ async function handleMessage(ws, data) {
       break;
       
     case 'request_hospitals_list':
-      handleRequestHospitalsList(ws);
+      await handleRequestHospitalsList(ws);
+      break;
+      
+    case 'get_all_hospitals':
+      await handleGetAllHospitals(ws);
       break;
       
     default:
@@ -539,15 +653,15 @@ async function handleRegisterAmbulance(ws, data) {
   activeAmbulances.set(ambulanceData.id, ambulanceData);
   console.log(`🚑 Ambulancia registrada: ${ambulanceData.id}`);
 
-  // Enviar lista actual de hospitales
+  // Enviar lista actual de hospitales conectados
   const hospitalsList = Array.from(activeHospitals.values()).map(hospital => ({
     id: hospital.info.id,
     nombre: hospital.info.nombre,
     lat: hospital.info.lat,
     lng: hospital.info.lng,
     direccion: hospital.info.direccion,
-    especialidades: hospital.info.especialidades || [],
-    camasDisponibles: hospital.info.camasDisponibles || 0,
+    especialidades: hospital.info.especialidades || ['General'],
+    camasDisponibles: hospital.info.camasDisponibles || 10,
     telefono: hospital.info.telefono || '',
     connected: true
   }));
@@ -566,60 +680,76 @@ async function handleRegisterHospital(ws, data) {
     return sendError(ws, 'Datos de hospital incompletos');
   }
 
-  let hospitalData = {
-    info: {
-      id: data.hospital.id,
-      nombre: data.hospital.nombre || `Hospital ${data.hospital.id}`,
-      direccion: data.hospital.direccion || '',
-      lat: data.hospital.lat,
-      lng: data.hospital.lng,
-      especialidades: data.hospital.especialidades || ['General'],
-      camasDisponibles: data.hospital.camasDisponibles || 10,
-      telefono: data.hospital.telefono || ''
-    },
-    ws: ws,
-    connectedAt: new Date().toISOString()
-  };
+  try {
+    // Primero buscar el hospital en la base de datos
+    const hospitalsFromDB = await getAllHospitalsFromDB();
+    const hospitalFromDB = hospitalsFromDB.find(h => h.id === data.hospital.id.toString());
 
-  // VERIFICACIÓN MEJORADA: Solo geocoding si no hay coordenadas válidas
-  if (hospitalData.info.direccion && (!hospitalData.info.lat || !hospitalData.info.lng)) {
-    console.log(`📍 Geocoding para hospital: ${hospitalData.info.direccion}`);
-    const geoResult = await geocodeAddressMorelia(hospitalData.info.direccion);
-    
-    if (geoResult) {
-      hospitalData.info.lat = geoResult.lat;
-      hospitalData.info.lng = geoResult.lng;
-      console.log(`✅ Hospital geocoded: ${hospitalData.info.lat}, ${hospitalData.info.lng}`);
-    } else {
-      console.log(`⚠️ Usando coordenadas por defecto para hospital ${hospitalData.info.id}`);
-      hospitalData.info.lat = 19.7024;
-      hospitalData.info.lng = -101.1969;
+    if (!hospitalFromDB) {
+      console.log(`❌ Hospital ${data.hospital.id} no encontrado en base de datos`);
+      return sendError(ws, 'Hospital no encontrado en el sistema');
     }
+
+    // Combinar datos del hospital
+    let hospitalData = {
+      info: {
+        ...hospitalFromDB,
+        lat: data.hospital.lat || hospitalFromDB.lat,
+        lng: data.hospital.lng || hospitalFromDB.lng,
+        direccion: data.hospital.direccion || hospitalFromDB.direccion,
+        nombre: data.hospital.nombre || hospitalFromDB.nombre,
+        telefono: data.hospital.telefono || hospitalFromDB.telefono,
+        especialidades: data.hospital.especialidades || hospitalFromDB.especialidades,
+        camasDisponibles: data.hospital.camasDisponibles || hospitalFromDB.camasDisponibles,
+        activo: true // Todos están activos por defecto
+      },
+      ws: ws,
+      connectedAt: new Date().toISOString(),
+      isFromDB: true
+    };
+
+    // Verificar coordenadas - geocodificar si es necesario
+    if ((!hospitalData.info.lat || !hospitalData.info.lng || 
+        hospitalData.info.lat === 19.7024) && hospitalData.info.direccion) {
+      console.log(`📍 Geocoding para hospital: ${hospitalData.info.direccion}`);
+      const geoResult = await geocodeAddressMorelia(hospitalData.info.direccion);
+      
+      if (geoResult) {
+        hospitalData.info.lat = geoResult.lat;
+        hospitalData.info.lng = geoResult.lng;
+        console.log(`✅ Hospital geocoded: ${hospitalData.info.lat}, ${hospitalData.info.lng}`);
+      }
+    }
+
+    activeHospitals.set(hospitalData.info.id, hospitalData);
+    console.log(`🏥 Hospital registrado: ${hospitalData.info.nombre} (${hospitalData.info.id})`);
+
+    // Enviar lista actual de ambulancias
+    const ambulancesList = Array.from(activeAmbulances.values()).map(ambulance => ({
+      id: ambulance.id,
+      placa: ambulance.placa,
+      tipo: ambulance.tipo,
+      status: ambulance.status,
+      location: ambulance.location,
+      speed: ambulance.speed,
+      heading: ambulance.heading,
+      lastUpdate: ambulance.lastUpdate
+    }));
+
+    sendMessage(ws, {
+      type: 'active_ambulances_update',
+      ambulances: ambulancesList,
+      hospitalInfo: hospitalData.info,
+      message: `${ambulancesList.length} ambulancias activas`
+    });
+
+    // Broadcast a todas las ambulancias que hay un nuevo hospital activo
+    broadcastActiveHospitals();
+
+  } catch (error) {
+    console.error('❌ Error en register hospital:', error);
+    sendError(ws, 'Error interno del servidor');
   }
-
-  activeHospitals.set(hospitalData.info.id, hospitalData);
-  console.log(`🏥 Hospital registrado: ${hospitalData.info.nombre}`);
-
-  // Enviar lista actual de ambulancias
-  const ambulancesList = Array.from(activeAmbulances.values()).map(ambulance => ({
-    id: ambulance.id,
-    placa: ambulance.placa,
-    tipo: ambulance.tipo,
-    status: ambulance.status,
-    location: ambulance.location,
-    speed: ambulance.speed,
-    heading: ambulance.heading,
-    lastUpdate: ambulance.lastUpdate
-  }));
-
-  sendMessage(ws, {
-    type: 'active_ambulances_update',
-    ambulances: ambulancesList,
-    hospitalInfo: hospitalData.info,
-    message: `${ambulancesList.length} ambulancias activas`
-  });
-
-  broadcastActiveHospitals();
 }
 
 function handleLocationUpdate(data) {
@@ -799,23 +929,19 @@ function handleCancelNavigation(data) {
   
   console.log(`🛑 Cancelando navegación: ambulancia ${ambulanceId}, hospital ${hospitalId}`);
   
-  // Actualizar estado de ambulancia
   const ambulance = activeAmbulances.get(ambulanceId);
   if (ambulance) {
     ambulance.status = 'disponible';
   }
   
-  // Eliminar ruta activa
   activeRoutes.delete(ambulanceId);
   
-  // Eliminar notificaciones pendientes
   pendingNotifications.forEach((notif, id) => {
     if (notif.ambulanceId === ambulanceId && notif.hospitalId === hospitalId) {
       pendingNotifications.delete(id);
     }
   });
   
-  // Notificar a ambos lados
   if (ambulance && ambulance.ws) {
     sendMessage(ambulance.ws, {
       type: 'navigation_cancelled',
@@ -875,15 +1001,15 @@ function handleRequestRouteUpdate(ws, data) {
   }
 }
 
-function handleRequestHospitalsList(ws) {
+async function handleRequestHospitalsList(ws) {
   const hospitalsList = Array.from(activeHospitals.values()).map(hospital => ({
     id: hospital.info.id,
     nombre: hospital.info.nombre,
     lat: hospital.info.lat,
     lng: hospital.info.lng,
     direccion: hospital.info.direccion,
-    especialidades: hospital.info.especialidades || [],
-    camasDisponibles: hospital.info.camasDisponibles || 0,
+    especialidades: hospital.info.especialidades || ['General'],
+    camasDisponibles: hospital.info.camasDisponibles || 10,
     telefono: hospital.info.telefono || '',
     connected: true
   }));
@@ -893,6 +1019,30 @@ function handleRequestHospitalsList(ws) {
     hospitals: hospitalsList,
     message: `${hospitalsList.length} hospitales conectados`
   });
+}
+
+async function handleGetAllHospitals(ws) {
+  try {
+    const hospitalsFromDB = await getAllHospitalsFromDB();
+    
+    // Marcar cuáles están conectados
+    const hospitalsWithStatus = hospitalsFromDB.map(hospital => ({
+      ...hospital,
+      connected: activeHospitals.has(hospital.id),
+      // Todos están activos por defecto
+      activo: true
+    }));
+
+    sendMessage(ws, {
+      type: 'all_hospitals_list',
+      hospitals: hospitalsWithStatus,
+      total: hospitalsWithStatus.length,
+      connected: activeHospitals.size
+    });
+  } catch (error) {
+    console.error('❌ Error obteniendo hospitales:', error);
+    sendError(ws, 'Error obteniendo lista de hospitales');
+  }
 }
 
 // ---------- UTILITY FUNCTIONS ----------
@@ -956,7 +1106,7 @@ setInterval(() => {
       pendingNotifications.delete(id);
     }
   });
-}, 60000); // Ejecutar cada minuto
+}, 60000);
 
 // Heartbeat mejorado
 setInterval(() => {
@@ -975,6 +1125,9 @@ server.listen(PORT, () => {
   console.log(`🚀 Servidor WebSocket ejecutándose en puerto ${PORT}`);
   console.log(`📡 Endpoint WebSocket: ws://localhost:${PORT}/ws`);
   console.log(`🏥 Health check: http://localhost:${PORT}/health`);
+  console.log(`🏥 API Hospitales (todos): http://localhost:${PORT}/api/all-hospitals`);
+  console.log(`🏥 API Hospitales (conectados): http://localhost:${PORT}/api/connected-hospitals`);
+  console.log(`🏥 API Hospitales (original): http://localhost:${PORT}/api/hospitals`);
   console.log(`🗺️  Geocoding API: http://localhost:${PORT}/geocode`);
   console.log(`🔍 Search API: http://localhost:${PORT}/search-addresses`);
   console.log(`🛣️  Directions API: http://localhost:${PORT}/directions`);

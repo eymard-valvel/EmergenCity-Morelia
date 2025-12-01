@@ -30,7 +30,7 @@ function Rutas() {
 					<Route path="/signup">
 						<Route path="operador" element={<OperadorFormulario />} />
 						<Route path="doctor" element={<DoctorFormulario />} />
-						<Route path="hospital" element={<HospitalFormulario />} />
+						<Route path="hospitales" element={<HospitalFormulario />} />
 						<Route path="paramedicos" element={<ParamedicoFormulario />} />
 					</Route>
 					<Route path="/login" element={<Login />} />
