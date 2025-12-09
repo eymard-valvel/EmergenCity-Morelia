@@ -348,13 +348,13 @@ export default function MapaHospitalOptimizado() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ address: address + ', Morelia, Michoacán' })
+        body: JSON.stringify({ address: address + ', Michoacán, México' })
       });
 
       if (response.ok) {
         const result = await response.json();
         if (result && result.lat && result.lng) {
-          console.log('✅ Hospital geocoded correctamente:', result.place_name);
+          console.log('✅ Hospital geocoded correctamente:', result.place_name, 'en', result.region || 'Michoacán');
           return { lat: result.lat, lng: result.lng };
         }
       }
@@ -534,10 +534,13 @@ export default function MapaHospitalOptimizado() {
             <strong style="font-size: 18px; color: #2E7D32;">${hospitalInfo.nombre}</strong>
             <div style="margin: 12px 0; font-size: 14px; color: #555;">
               <div><strong>📍 Dirección:</strong> ${hospitalInfo.direccion}</div>
+              ${hospitalInfo.region ? `<div><strong>🏞️ Región:</strong> ${hospitalInfo.region}</div>` : ''}
+              ${hospitalInfo.municipality ? `<div><strong>🏙️ Municipio:</strong> ${hospitalInfo.municipality}</div>` : ''}
               <div><strong>📞 Teléfono:</strong> ${hospitalInfo.telefono || 'No disponible'}</div>
               <div><strong>🛏️ Camas disponibles:</strong> ${hospitalInfo.camasDisponibles}</div>
               <div><strong>🏥 Especialidades:</strong> ${hospitalInfo.especialidades.join(', ')}</div>
               <div><strong>📊 Estado:</strong> ${hospitalInfo.activo ? '✅ ACTIVO' : '❌ INACTIVO'}</div>
+              <div><strong>🔗 Conexión:</strong> ${hospitalInfo.connected ? '✅ CONECTADO' : '❌ DESCONECTADO'}</div>
             </div>
             <em style="color: #888; font-size: 12px;">Centro médico operativo - Sistema de emergencias</em>
           </div>
@@ -754,17 +757,8 @@ export default function MapaHospitalOptimizado() {
     setPatientNotifications(prev => [...prev, notification]);
     setSelectedNotification(notification);
 
-    if (data.routeGeometry) {
-      drawRouteOnMap(data.routeGeometry);
-      setActiveRoute({
-        ambulanceId: data.ambulanceId,
-        geometry: data.routeGeometry,
-        distance: data.rawDistance || data.distance,
-        duration: data.rawDuration || data.eta * 60,
-        formattedDistance: data.distance ? `${data.distance} km` : 'Calculando...',
-        formattedDuration: data.eta ? `${data.eta} min` : 'Calculando...'
-      });
-    }
+    // NO dibujar ruta aquí - solo cuando el hospital acepte
+    // La ruta se trazará cuando el hospital acepte al paciente
 
     showToast('info', 'Nuevo Paciente en Camino', 
       `Ambulancia ${data.ambulanceId} - ETA: ${data.eta || '?'} min`);
@@ -818,7 +812,6 @@ export default function MapaHospitalOptimizado() {
       prev.filter(n => n.notificationId !== notification.notificationId)
     );
     
-    clearRoute();
     showToast('warning', 'Paciente Rechazado', 'Se ha notificado a la ambulancia');
     onNotificationClose();
   };
